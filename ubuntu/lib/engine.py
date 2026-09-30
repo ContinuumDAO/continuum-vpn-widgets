@@ -529,7 +529,7 @@ def import_staged(profile_dir: str, meta: dict[str, Any]) -> str:
         dest = os.path.join(stage, f"{iface}.conf")
         shutil.copyfile(os.path.join(profile_dir, "wg.conf"), dest)
         os.chmod(dest, 0o600)
-        imported = nm("connection", "import", "type", "wireguard", "file", dest)
+        imported = nm("connection", "import", "type", "wireguard", "file", dest, check=False)
         if imported.returncode != 0:
             fail(imported.stderr.strip() or "NetworkManager did not import the tunnel")
     finally:
@@ -548,6 +548,7 @@ def import_staged(profile_dir: str, meta: dict[str, Any]) -> str:
         iface,
         "connection.autoconnect",
         "no",
+        check=False,
     )
     if modified.returncode != 0:
         fail(modified.stderr.strip() or "NetworkManager did not update the connection")
