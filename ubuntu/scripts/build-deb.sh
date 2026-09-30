@@ -12,10 +12,13 @@ mkdir -p \
   "$STAGE/usr/bin" \
   "$STAGE/usr/lib/continuum-vpn/bin" \
   "$STAGE/usr/share/applications" \
+  "$STAGE/usr/share/icons/hicolor/256x256/apps" \
   "$STAGE/usr/share/polkit-1/actions" \
   "$STAGE/usr/share/doc/continuum-vpn-widget"
 
 install -m 0755 "$ROOT/lib/engine.py" "$ROOT/lib/widget.py" "$ROOT/lib/priv-helper" "$STAGE/usr/lib/continuum-vpn/"
+install -m 0644 "$ROOT/icons/continuum-vpn.png" "$ROOT/icons/continuum-logo.png" "$STAGE/usr/lib/continuum-vpn/"
+install -m 0644 "$ROOT/icons/continuum-vpn.png" "$STAGE/usr/share/icons/hicolor/256x256/apps/continuum-vpn.png"
 install -m 0644 "$ROOT/VERSION" "$STAGE/usr/lib/continuum-vpn/VERSION"
 install -m 0755 "$ROOT/third-party/bin/sslocal" "$ROOT/third-party/bin/wg-obfuscator" "$ROOT/third-party/bin/udp2raw" "$STAGE/usr/lib/continuum-vpn/bin/"
 install -m 0644 "$ROOT/continuum-vpn-widget.desktop" "$STAGE/usr/share/applications/continuum-vpn-widget.desktop"
@@ -33,6 +36,9 @@ cat >"$STAGE/DEBIAN/postinst" <<'EOF'
 #!/bin/sh
 set -e
 chmod 0755 /usr/lib/continuum-vpn/priv-helper /usr/lib/continuum-vpn/bin/sslocal /usr/lib/continuum-vpn/bin/wg-obfuscator /usr/lib/continuum-vpn/bin/udp2raw /usr/bin/continuum-vpn-widget
+if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+  gtk-update-icon-cache -q /usr/share/icons/hicolor || true
+fi
 exit 0
 EOF
 chmod 0755 "$STAGE/DEBIAN/postinst"
