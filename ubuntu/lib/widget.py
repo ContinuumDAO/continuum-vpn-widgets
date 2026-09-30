@@ -36,17 +36,15 @@ def run_tray() -> int:
         print(f"Continuum VPN needs GTK and AppIndicator: {exc}", file=sys.stderr)
         return 1
 
-    tray_icon = asset("continuum-vpn.png")
     logo = asset("continuum-logo.png")
-    # A full-color file, not a symbolic status name, so the shell draws this
-    # as its own panel icon instead of folding it into the system status icons.
+    # Theme icon name only. An absolute image path is cached by the shell in a
+    # way that makes other tray icons, such as Cursor's, reload and fade.
     indicator = AyatanaAppIndicator3.Indicator.new(
         "continuum-vpn",
-        tray_icon or "continuum-vpn",
+        "continuum-vpn",
         AyatanaAppIndicator3.IndicatorCategory.APPLICATION_STATUS,
     )
-    if tray_icon:
-        indicator.set_icon_full(tray_icon, "Continuum VPN")
+    indicator.set_icon_full("continuum-vpn", "Continuum VPN")
     indicator.set_status(AyatanaAppIndicator3.IndicatorStatus.ACTIVE)
     indicator.set_title("Continuum VPN")
     if logo:
