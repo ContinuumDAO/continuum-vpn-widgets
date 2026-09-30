@@ -1,0 +1,16 @@
+#!/usr/bin/env python3
+"""Stand-in udp2raw. Opens no raw socket; marks the local port as listening."""
+
+import os
+import sys
+import time
+
+port = "1"
+for arg in sys.argv[1:]:
+    if arg.startswith("127.0.0.1:"):
+        port = arg.split(":", 1)[1]
+listen = os.environ.get("CONTINUUM_VPN_LISTEN_DIR")
+if listen:
+    with open(os.path.join(listen, port), "w", encoding="utf-8") as handle:
+        handle.write("up\n")
+time.sleep(30)

@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=Continuum VPN
+Comment=Turn a Continuum node or egress exit on or off
+Exec=continuum-vpn-widget
+Icon=network-vpn
+Terminal=false
+Type=Application
+Categories=Network;
+StartupNotify=false

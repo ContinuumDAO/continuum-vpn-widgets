@@ -1,0 +1,5 @@
+#!/bin/sh
+set -eu
+ROOT="$(CDPATH= cd -- "$(dirname "$0")" && pwd)"
+export CONTINUUM_VPN_BIN_DIR="${CONTINUUM_VPN_BIN_DIR:-$ROOT/lib/bin}"
+exec python3 "$ROOT/lib/widget.py" "$@"

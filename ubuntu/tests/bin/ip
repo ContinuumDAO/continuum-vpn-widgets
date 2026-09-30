@@ -1,0 +1,10 @@
+#!/bin/sh
+# Fake default route and a log of route changes.
+set -eu
+LOG="${CONTINUUM_VPN_IP_LOG:-/tmp/continuum-vpn-ip.log}"
+if [ "${1:-}" = "-4" ] && [ "${2:-}" = "route" ] && [ "${3:-}" = "show" ]; then
+  printf '%s\n' "default via 192.0.2.1 dev eth0 proto dhcp"
+  exit 0
+fi
+printf '%s\n' "$*" >>"$LOG"
+exit 0

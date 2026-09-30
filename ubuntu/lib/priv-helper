@@ -1,0 +1,290 @@
+#!/usr/bin/env python3
+"""Root helper for Continuum VPN.
+
+Starts the bundled udp2raw binary with a fixed argument list, and adds or
+removes a host route. It never runs a shell and never reads a downloaded script.
+"""
+
+from __future__ import annotations
+
+import ipaddress
+import json
+import os
+import re
+import signal
+import stat
+import subprocess
+import sys
+import time
+
+LIB_DIR = os.path.dirname(os.path.realpath(__file__))
+UDP2RAW = os.path.join(LIB_DIR, "bin", "udp2raw")
+HOST_RE = re.compile(r"^[A-Za-z0-9.:-]{1,253}$")
+
+
+def die(message: str) -> None:
+    print(message, file=sys.stderr)
+    raise SystemExit(1)
+
+
+def private_file(path: str) -> None:
+    if not os.path.isabs(path):
+        die("path must be absolute")
+    try:
+        info = os.lstat(path)
+    except OSError as exc:
+        die(str(exc))
+    if stat.S_ISLNK(info.st_mode):
+        die("refusing a symlink")
+    if info.st_mode & 0o022:
+        die("file is group or world writable")
+    parent = os.lstat(os.path.dirname(path))
+    if stat.S_ISLNK(parent.st_mode) or not stat.S_ISDIR(parent.st_mode):
+        die("parent is not a directory")
+    if parent.st_mode & 0o022:
+        die("directory is group or world writable")
+
+
+def load_json(path: str) -> dict:
+    private_file(path)
+    with open(path, encoding="utf-8") as handle:
+        data = json.load(handle)
+    if not isinstance(data, dict):
+        die("request must be a JSON object")
+    return data
+
+
+def check_host(host: str) -> str:
+    if not isinstance(host, str) or not HOST_RE.fullmatch(host) or ".." in host or host.startswith("-"):
+        die("host is not a name or address")
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        if not re.fullmatch(r"[A-Za-z0-9.-]{1,253}", host):
+            die("host is not a name or address")
+    return host
+
+
+def check_port(value: object) -> int:
+    try:
+        port = int(value)
+    except (TypeError, ValueError):
+        die("port must be an integer")
+    if not 1 <= port <= 65535:
+        die("port is out of range")
+    return port
+
+
+def udp2raw_argv(data: dict) -> list[str]:
+    if data.get("localHost") != "127.0.0.1":
+        die("localHost must be 127.0.0.1")
+    if data.get("rawMode") != "faketcp":
+        die("rawMode must be faketcp")
+    local_port = check_port(data.get("localPort"))
+    remote_port = check_port(data.get("remotePort"))
+    remote_host = check_host(str(data.get("remoteHost") or ""))
+    password = data.get("password")
+    if not isinstance(password, str) or password == "" or "\n" in password or "\x00" in password:
+        die("password is missing")
+    binary = os.path.realpath(UDP2RAW)
+    if not os.path.isfile(binary) or not os.access(binary, os.X_OK):
+        die("bundled udp2raw is missing")
+    return [
+        binary,
+        "-c",
+        "-l",
+        f"127.0.0.1:{local_port}",
+        "-r",
+        f"{remote_host}:{remote_port}",
+        "-k",
+        password,
+        "--raw-mode",
+        "faketcp",
+        "-a",
+    ]
+
+
+def pid_from_file(path: str) -> int:
+    if not os.path.isfile(path):
+        return 0
+    private_file(path)
+    try:
+        return int(open(path, encoding="utf-8").read().strip() or "0")
+    except ValueError:
+        return 0
+
+
+def process_is_udp2raw(pid: int) -> bool:
+    if pid <= 1:
+        return False
+    expected = os.path.realpath(UDP2RAW)
+    link = f"/proc/{pid}/exe"
+    try:
+        if os.path.realpath(link) == expected:
+            return True
+    except OSError:
+        return False
+    try:
+        raw = open(f"/proc/{pid}/cmdline", "rb").read().split(b"\0", 1)[0]
+    except OSError:
+        return False
+    try:
+        return os.path.realpath(raw.decode()) == expected
+    except (OSError, ValueError):
+        return False
+
+
+def stop_pid(path: str) -> None:
+    if not os.path.isfile(path):
+        return
+    pid = pid_from_file(path)
+    if pid and process_is_udp2raw(pid):
+        os.kill(pid, signal.SIGTERM)
+        for _ in range(30):
+            try:
+                os.kill(pid, 0)
+            except OSError:
+                break
+            time.sleep(0.1)
+        if process_is_udp2raw(pid):
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except OSError:
+                pass
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+
+
+def listening(port: int) -> bool:
+    probe = subprocess.run(
+        ["ss", "-l", "-n", "-H", f"sport = :{port}"],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    return probe.returncode == 0 and bool(probe.stdout.strip())
+
+
+def start_udp2raw(data: dict) -> None:
+    pid_path = str(data.get("pidFile") or "")
+    if not pid_path or not os.path.isabs(pid_path):
+        die("pidFile must be absolute")
+    parent = os.path.dirname(pid_path)
+    os.makedirs(parent, mode=0o700, exist_ok=True)
+    if os.path.isdir(parent):
+        os.chmod(parent, 0o700)
+    stop_pid(pid_path)
+    argv = udp2raw_argv(data)
+    log_path = pid_path + ".log"
+    log = os.open(log_path, os.O_CREAT | os.O_WRONLY | os.O_APPEND, 0o600)
+    pid = os.fork()
+    if pid == 0:
+        os.setsid()
+        os.dup2(log, 1)
+        os.dup2(log, 2)
+        devnull = os.open(os.devnull, os.O_RDONLY)
+        os.dup2(devnull, 0)
+        os.execv(argv[0], argv)
+        os._exit(127)
+    os.close(log)
+    with open(pid_path, "w", encoding="utf-8") as handle:
+        handle.write(str(pid))
+    os.chmod(pid_path, 0o600)
+    port = check_port(data.get("localPort"))
+    for _ in range(50):
+        if listening(port):
+            return
+        alive = True
+        try:
+            waited, status = os.waitpid(pid, os.WNOHANG)
+        except ChildProcessError:
+            waited, status = pid, 1
+            alive = False
+        if waited == pid and not alive:
+            die("udp2raw exited before it listened")
+        if waited == pid and os.WIFEXITED(status):
+            die("udp2raw exited before it listened")
+        time.sleep(0.1)
+    stop_pid(pid_path)
+    die(f"udp2raw did not listen on port {port}")
+
+
+def default_route(ipv6: bool) -> tuple[str, str]:
+    family = "-6" if ipv6 else "-4"
+    result = subprocess.run(
+        ["ip", family, "route", "show", "default"],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    match = re.search(r"default via (\S+) dev (\S+)", result.stdout)
+    if not match:
+        die("no default route")
+    return match.group(1), match.group(2)
+
+
+def route_add(data: dict) -> None:
+    host = check_host(str(data.get("host") or ""))
+    try:
+        parsed = ipaddress.ip_address(host)
+        ipv6 = isinstance(parsed, ipaddress.IPv6Address)
+    except ValueError:
+        ipv6 = ":" in host
+    gateway, device = default_route(ipv6)
+    family = "-6" if ipv6 else "-4"
+    suffix = "/128" if ipv6 else "/32"
+    result = subprocess.run(
+        ["ip", family, "route", "replace", host + suffix, "via", gateway, "dev", device],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if result.returncode != 0:
+        die(result.stderr.strip() or "could not add the bypass route")
+
+
+def route_del(data: dict) -> None:
+    host = check_host(str(data.get("host") or ""))
+    try:
+        parsed = ipaddress.ip_address(host)
+        ipv6 = isinstance(parsed, ipaddress.IPv6Address)
+    except ValueError:
+        ipv6 = ":" in host
+    family = "-6" if ipv6 else "-4"
+    suffix = "/128" if ipv6 else "/32"
+    subprocess.run(
+        ["ip", family, "route", "del", host + suffix],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+
+
+def main() -> int:
+    if len(sys.argv) != 3:
+        die("usage: priv-helper udp2raw-start|udp2raw-stop|route-add|route-del REQUEST.json")
+    command, path = sys.argv[1], sys.argv[2]
+    data = load_json(path)
+    if command == "udp2raw-start":
+        start_udp2raw(data)
+    elif command == "udp2raw-stop":
+        pid_path = str(data.get("pidFile") or "")
+        if pid_path:
+            stop_pid(pid_path)
+    elif command == "route-add":
+        route_add(data)
+    elif command == "route-del":
+        route_del(data)
+    else:
+        die(f"unknown command {command}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

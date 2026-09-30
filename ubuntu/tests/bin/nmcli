@@ -1,0 +1,129 @@
+#!/usr/bin/env python3
+"""Test double for nmcli. Not a NetworkManager."""
+
+from __future__ import annotations
+
+import json
+import os
+import sys
+import uuid
+
+STATE = os.environ["CONTINUUM_VPN_NM_STATE"]
+CON = os.path.join(STATE, "con")
+os.makedirs(CON, exist_ok=True)
+
+
+def load() -> dict:
+    path = os.path.join(CON, "db.json")
+    if not os.path.isfile(path):
+        return {}
+    with open(path, encoding="utf-8") as handle:
+        return json.load(handle)
+
+
+def save(db: dict) -> None:
+    path = os.path.join(CON, "db.json")
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(db, handle)
+
+
+def by_id(db: dict, name: str) -> dict | None:
+    for row in db.values():
+        if row["id"] == name:
+            return row
+    return None
+
+
+def main() -> int:
+    args = sys.argv[1:]
+    db = load()
+    if args[:3] == ["connection", "import", "type"] and "file" in args:
+        path = args[args.index("file") + 1]
+        iface = os.path.splitext(os.path.basename(path))[0]
+        ident = str(uuid.uuid4())
+        db[ident] = {
+            "id": iface,
+            "iface": iface,
+            "type": "wireguard",
+            "active": False,
+            "autoconnect": True,
+        }
+        save(db)
+        return 0
+    if args[:2] == ["connection", "delete"]:
+        db.pop(args[2], None)
+        save(db)
+        return 0
+    if args[:2] == ["connection", "up"]:
+        row = db.get(args[2])
+        if not row:
+            return 1
+        row["active"] = True
+        save(db)
+        return 0
+    if args[:2] == ["connection", "down"]:
+        row = db.get(args[2])
+        if row:
+            row["active"] = False
+            save(db)
+        return 0
+    if args[:2] == ["connection", "modify"]:
+        ident = args[2]
+        row = db.get(ident)
+        if not row:
+            return 1
+        rest = args[3:]
+        i = 0
+        while i < len(rest):
+            key = rest[i]
+            value = rest[i + 1]
+            if key == "connection.id":
+                row["id"] = value
+            elif key == "connection.interface-name":
+                row["iface"] = value
+            elif key == "connection.autoconnect":
+                row["autoconnect"] = value == "yes"
+            i += 2
+        save(db)
+        return 0
+    if args[:2] == ["-g", "connection.uuid"] and args[2:4] == ["connection", "show"]:
+        row = by_id(db, args[4])
+        if not row:
+            return 1
+        for ident, item in db.items():
+            if item is row:
+                print(ident)
+                return 0
+        return 1
+    if args[:2] == ["-g", "connection.interface-name"] and args[2:4] == ["connection", "show"]:
+        row = db.get(args[4])
+        if not row:
+            return 1
+        print(row["iface"])
+        return 0
+    if args[:2] == ["-g", "connection.id"] and args[2:4] == ["connection", "show"]:
+        row = db.get(args[4])
+        if not row:
+            return 1
+        print(row["id"])
+        return 0
+    if args[:2] == ["-g", "GENERAL.STATE"] and args[2:4] == ["connection", "show"]:
+        row = db.get(args[4])
+        if not row or not row["active"]:
+            print("disconnected")
+            return 0 if row else 1
+        print("activated")
+        return 0
+    if args[:3] == ["-t", "-f", "UUID,TYPE"] and args[3:5] == ["connection", "show"]:
+        active_only = "--active" in args
+        for ident, row in db.items():
+            if active_only and not row["active"]:
+                continue
+            print(f"{ident}:{row['type']}")
+        return 0
+    print("unsupported nmcli invocation: " + " ".join(args), file=sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

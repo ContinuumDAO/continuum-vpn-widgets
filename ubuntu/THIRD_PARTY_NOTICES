@@ -1,0 +1,23 @@
+Third-party programs shipped in the Ubuntu package
+===================================================
+
+These binaries are installed under /usr/lib/continuum-vpn/bin and are started
+only by Continuum VPN. Versions are pinned in ubuntu/versions.env.
+
+shadowsocks-rust (sslocal)
+  Upstream: https://github.com/shadowsocks/shadowsocks-rust
+  Version: v1.25.0
+  License: MIT
+
+wg-obfuscator
+  Upstream: https://github.com/ClusterM/wg-obfuscator
+  Version: v1.6
+  License: GPL-3.0-only
+  Corresponding source: https://github.com/ClusterM/wg-obfuscator/tree/v1.6
+  The GPL license text is installed beside this notice as wg-obfuscator-LICENSE.
+  Continuum VPN runs this program as a separate process.
+
+udp2raw
+  Upstream: https://github.com/wangyu-/udp2raw
+  Version: 20230206.0
+  License: MIT
