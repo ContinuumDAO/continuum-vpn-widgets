@@ -116,8 +116,8 @@ def run_tray() -> int:
         if ui["window"] is not None:
             return ui["window"]
         window = Gtk.Window(title="Continuum VPN")
-        window.set_default_size(340, 460)
-        window.set_resizable(False)
+        window.set_default_size(380, 560)
+        window.set_resizable(True)
         window.set_position(Gtk.WindowPosition.NONE)
         window.set_skip_taskbar_hint(True)
         window.set_skip_pager_hint(True)
@@ -139,11 +139,31 @@ def run_tray() -> int:
         title.set_halign(Gtk.Align.CENTER)
         hero.pack_start(title, False, False, 0)
 
-        profile_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        profile_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
         profile_box.set_margin_start(18)
         profile_box.set_margin_end(18)
         profile_box.set_margin_top(8)
         profile_box.set_margin_bottom(8)
+
+        status = Gtk.Label(label="Disconnected")
+        status.set_halign(Gtk.Align.START)
+        status.set_line_wrap(True)
+        status.set_max_width_chars(36)
+        status.set_margin_start(18)
+        status.set_margin_end(18)
+        status.set_margin_top(4)
+
+        connect = Gtk.Button.new_with_label("Connect")
+        connect.set_halign(Gtk.Align.START)
+        connect.set_margin_start(18)
+        connect.set_margin_end(18)
+        connect.set_margin_bottom(4)
+        connect.connect("clicked", on_connect)
+
+        scrolled = Gtk.ScrolledWindow()
+        scrolled.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        scrolled.set_min_content_height(180)
+        scrolled.add(profile_box)
 
         actions = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
         actions.set_margin_start(18)
@@ -152,7 +172,9 @@ def run_tray() -> int:
 
         root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
         root.pack_start(hero, False, False, 0)
-        root.pack_start(profile_box, True, True, 0)
+        root.pack_start(status, False, False, 0)
+        root.pack_start(connect, False, False, 0)
+        root.pack_start(scrolled, True, True, 0)
         root.pack_start(actions, False, False, 0)
         window.add(root)
         add_button(actions, "Import bundle…", on_import)
@@ -161,7 +183,10 @@ def run_tray() -> int:
         add_button(actions, "Quit", lambda *_: Gtk.main_quit())
         ui["window"] = window
         ui["profile_box"] = profile_box
+        ui["status_label"] = status
+        ui["connect_button"] = connect
         rebuild.signature = None
+        rebuild()
         return window
 
     def place_window() -> None:
@@ -209,17 +234,74 @@ def run_tray() -> int:
         button.set_halign(Gtk.Align.FILL)
         box.pack_start(button, False, False, 0)
 
-    def profile_text(row: dict) -> str:
-        text = row["label"]
-        if row.get("countryFlag"):
-            text = f"{row['countryFlag']} {text}"
-        if row.get("detail"):
-            text = f"{text} — {row['detail']}"
+    def profile_caption(row: dict) -> str:
+        label = str(row.get("label") or row.get("iface") or "")
+        code = str(row.get("countryCode") or "")
+        if not code:
+            return label
+        flag = str(row.get("countryFlag") or "")
+        return f"{flag} {code}  {label}".strip()
+
+    def profile_detail(row: dict) -> str:
+        stored = str(row.get("detail") or "").strip()
+        if stored:
+            return stored
+        obfuscation = str(row.get("obfuscation") or "none")
+        names = {
+            "shadowsocks": "WireGuard, with Shadowsocks",
+            "wg_obfuscator": "WireGuard, with wg-obfuscator",
+            "lwo": "WireGuard, with LWO",
+            "udp2raw": "WireGuard, with udp2raw",
+        }
+        return names.get(obfuscation, "WireGuard")
+
+    def selected_row() -> dict | None:
+        iface = ui.get("selected")
+        for row in ui.get("rows") or []:
+            if row.get("iface") == iface:
+                return row
+        return None
+
+    def refresh_connection_controls() -> None:
+        row = selected_row()
+        button = ui.get("connect_button")
+        status = ui.get("status_label")
+        active = next((item for item in ui.get("rows") or [] if item.get("active")), None)
+        if status is not None:
+            if active:
+                status.set_text(f"Connected to {profile_caption(active)}")
+            else:
+                status.set_text("Disconnected")
+        if button is None:
+            return
+        if row is None:
+            button.set_label("Connect")
+            button.set_sensitive(False)
+            return
+        button.set_sensitive(True)
+        caption = profile_caption(row)
+        button.set_label(("Disconnect " if row.get("active") else "Connect ") + caption)
+
+    def choose_profile(button, iface: str) -> None:
+        if button.get_active():
+            ui["selected"] = iface
+            refresh_connection_controls()
+
+    def on_connect(*_args) -> None:
+        row = selected_row()
+        if row is None:
+            alert("Choose a profile first.")
+            return
+        iface = str(row["iface"])
         if row.get("active"):
-            text = f"● {text}"
-        return text
+            call(engine.down_profile, iface)
+        else:
+            call(engine.up_profile, iface)
+        rebuild.signature = None
+        rebuild()
 
     def toggle_profile(iface: str, active: bool):
+        ui["selected"] = iface
         if active:
             call(engine.down_profile, iface)
         else:
@@ -240,6 +322,11 @@ def run_tray() -> int:
         failed = bool(rows and isinstance(rows[0], dict) and rows[0].get("error") and "label" not in rows[0])
         error_text = rows[0]["error"] if failed else ""
         shown = [] if failed else rows
+        ui["rows"] = shown
+        available = {str(row.get("iface")) for row in shown}
+        if ui.get("selected") not in available:
+            active_iface = next((str(row["iface"]) for row in shown if row.get("active")), "")
+            ui["selected"] = active_iface or (str(shown[0]["iface"]) if shown else None)
         profile_box = ui["profile_box"]
         if profile_box is not None:
             clear(profile_box)
@@ -249,17 +336,39 @@ def run_tray() -> int:
                 label.set_max_width_chars(32)
                 profile_box.pack_start(label, False, False, 0)
             elif not shown:
-                label = Gtk.Label(label="No profiles yet")
-                label.set_halign(Gtk.Align.CENTER)
+                label = Gtk.Label(
+                    label=(
+                        "No profiles yet. On the node VPN panel, save one "
+                        "continuum-vpn-….json file per exit and import it here."
+                    )
+                )
+                label.set_line_wrap(True)
+                label.set_max_width_chars(36)
+                label.set_halign(Gtk.Align.START)
                 profile_box.pack_start(label, False, False, 0)
+            group = None
             for row in shown:
                 iface = row["iface"]
-                active = bool(row.get("active"))
-                add_button(
-                    profile_box,
-                    profile_text(row),
-                    lambda _button, iface=iface, active=active: toggle_profile(iface, active),
-                )
+                block = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+                caption = profile_caption(row)
+                if row.get("active"):
+                    caption = f"{caption}  ·  connected"
+                radio = Gtk.RadioButton.new_with_label_from_widget(group, caption)
+                if group is None:
+                    group = radio
+                radio.set_halign(Gtk.Align.START)
+                radio.set_active(iface == ui.get("selected"))
+                radio.connect("toggled", lambda button, iface=iface: choose_profile(button, iface))
+                detail = Gtk.Label(label=profile_detail(row))
+                detail.set_line_wrap(True)
+                detail.set_max_width_chars(38)
+                detail.set_xalign(0)
+                detail.set_margin_start(24)
+                detail.get_style_context().add_class("dim-label")
+                block.pack_start(radio, False, False, 0)
+                block.pack_start(detail, False, False, 0)
+                profile_box.pack_start(block, False, False, 0)
+            refresh_connection_controls()
 
         menu = Gtk.Menu()
 
@@ -288,8 +397,9 @@ def run_tray() -> int:
             for row in shown:
                 iface = row["iface"]
                 active = bool(row.get("active"))
+                verb = "Disconnect" if active else "Connect"
                 menu_item(
-                    profile_text(row),
+                    f"{verb} {profile_caption(row)}",
                     lambda _item, iface=iface, active=active: toggle_profile(iface, active),
                 )
         sep()
@@ -309,6 +419,33 @@ def run_tray() -> int:
             window.show_all()
         return True
 
+    def read_chosen_file(chooser) -> tuple[str, str] | None:
+        gfile = chooser.get_file()
+        path = chooser.get_filename()
+        name = "bundle.json"
+        if gfile is not None:
+            name = gfile.get_basename() or name
+            path = gfile.get_path() or path
+            if not path or not os.path.isfile(path):
+                try:
+                    ok, data, _etag = gfile.load_contents()
+                except Exception as exc:
+                    alert(f"Could not read {name}: {exc}")
+                    return None
+                if not ok:
+                    alert(f"Could not read {name}.")
+                    return None
+                return name, bytes(data).decode("utf-8-sig")
+        if not path:
+            alert("No file selected.")
+            return None
+        try:
+            with open(path, encoding="utf-8-sig") as handle:
+                return os.path.basename(path) or name, handle.read()
+        except OSError as exc:
+            alert(f"Could not read the selected file: {exc}")
+            return None
+
     def on_import(*_args) -> None:
         present_window()
         chooser = Gtk.FileChooserDialog(
@@ -318,10 +455,30 @@ def run_tray() -> int:
         )
         chooser.add_button("Cancel", Gtk.ResponseType.CANCEL)
         chooser.add_button("Import", Gtk.ResponseType.ACCEPT)
+        bundle_filter = Gtk.FileFilter()
+        bundle_filter.set_name("Continuum VPN bundle")
+        for pattern in (
+            "continuum-vpn-*.json",
+            "cont-full.conf",
+            "cont-split.conf",
+            "cont-egress.conf",
+            "*.json",
+            "*.conf",
+        ):
+            bundle_filter.add_pattern(pattern)
+        chooser.add_filter(bundle_filter)
+        any_filter = Gtk.FileFilter()
+        any_filter.set_name("All files")
+        any_filter.add_pattern("*")
+        chooser.add_filter(any_filter)
+        downloads = GLib.get_user_special_dir(GLib.UserDirectory.DIRECTORY_DOWNLOAD)
+        if downloads:
+            chooser.set_current_folder(downloads)
         if chooser.run() == Gtk.ResponseType.ACCEPT:
-            call(engine.import_file, chooser.get_filename())
-            rebuild.signature = None
-            rebuild()
+            chosen = read_chosen_file(chooser)
+            if chosen is not None and call(engine.import_text, chosen[1], chosen[0]) is not None:
+                rebuild.signature = None
+                rebuild()
         chooser.destroy()
 
     def on_paste(*_args) -> None:

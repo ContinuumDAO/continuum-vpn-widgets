@@ -58,6 +58,39 @@ if grep -q 'PostUp' "$CONTINUUM_VPN_CONFIG_DIR/profiles/cont-full/wg.conf"; then
   exit 1
 fi
 
+# A pasted WireGuard config is stored under its endpoint, so a second node
+# does not overwrite the first. The node's continuum-vpn-<iface>.json keeps
+# the iface from the bundle.
+PASTE_LABEL="$("${ENGINE[@]}" import-text "pasted.conf" <<EOF
+[Interface]
+PrivateKey = $PRIV
+Address = 10.8.0.2/32
+[Peer]
+PublicKey = $PUB
+Endpoint = 203.0.113.9:51820
+AllowedIPs = 0.0.0.0/0
+EOF
+)"
+[[ "$PASTE_LABEL" == "203.0.113.9" ]]
+test -f "$CONTINUUM_VPN_CONFIG_DIR/profiles/203.0.113.9/meta.json"
+
+NODEB="$WORKDIR/continuum-vpn-cont-full.json"
+python3 - "$NODEB" "$PRIV" "$PUB" <<'PY'
+import json, sys
+path, priv, pub = sys.argv[1:]
+json.dump({
+  "label": "Full tunnel",
+  "source": "admin",
+  "obfuscation": "none",
+  "iface": "cont-full",
+  "detail": "WireGuard, with ad/tracking blocking with Blocky",
+  "wireGuardConfig": f"[Interface]\nPrivateKey = {priv}\nAddress = 10.8.0.2/32\n[Peer]\nPublicKey = {pub}\nEndpoint = 198.51.100.8:51820\nAllowedIPs = 0.0.0.0/0\n",
+}, open(path, "w"))
+PY
+[[ "$("${ENGINE[@]}" import-file "$NODEB")" == "Full tunnel" ]]
+test -f "$CONTINUUM_VPN_CONFIG_DIR/profiles/cont-full/meta.json"
+test -f "$CONTINUUM_VPN_CONFIG_DIR/profiles/203.0.113.9/meta.json"
+
 SHELLB="$WORKDIR/shell.json"
 python3 - "$SHELLB" "$PRIV" "$PUB" <<'PY'
 import json, sys

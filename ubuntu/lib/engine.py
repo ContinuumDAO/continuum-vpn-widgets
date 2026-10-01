@@ -10,6 +10,7 @@ import and are never run.
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import os
 import re
@@ -409,15 +410,32 @@ def bundle_from_json(text: str) -> dict[str, Any]:
     }
 
 
+def iface_from_endpoint(parsed: dict[str, Any]) -> tuple[str, str]:
+    endpoint = ""
+    for peer in parsed["peers"]:
+        if peer.get("Endpoint"):
+            endpoint = str(peer["Endpoint"])
+    host = endpoint.rsplit(":", 1)[0].strip().strip("[]")
+    label = host or "WireGuard"
+    cleaned = re.sub(r"[^A-Za-z0-9_=+.\-]", "", host)
+    if IFACE_RE.fullmatch(cleaned) and cleaned[:1].isalnum():
+        return cleaned, label
+    digest = hashlib.sha256((host or endpoint or "wireguard").encode()).hexdigest()[:12]
+    return f"wg-{digest}", label
+
+
 def bundle_from_conf(text: str, filename: str) -> dict[str, Any]:
     if looks_like_shell(text, filename):
         fail("refusing to import a shell script")
     parsed = parse_wg(text)
     stem = os.path.splitext(os.path.basename(filename))[0]
+    label = stem
+    if stem in {"", "pasted"} or not IFACE_RE.fullmatch(stem):
+        stem, label = iface_from_endpoint(parsed)
     if not IFACE_RE.fullmatch(stem):
         fail("config filename must be an interface name of 1-15 characters from [A-Za-z0-9_=+.-]")
     return {
-        "label": stem,
+        "label": label,
         "countryCode": "",
         "detail": "",
         "source": "admin",
@@ -560,6 +578,7 @@ def import_staged(profile_dir: str, meta: dict[str, Any]) -> str:
 
 
 def import_text(text: str, filename: str = "pasted.conf") -> str:
+    text = text.lstrip("\ufeff")
     if not text.strip():
         fail("empty config")
     _, profiles, _ = ensure_dirs()
