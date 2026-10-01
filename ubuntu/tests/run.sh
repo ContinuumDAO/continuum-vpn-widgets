@@ -179,7 +179,9 @@ ss = rows["1.2.3.4"]
 assert ss["label"] == "Frankfurt"
 assert ss["countryCode"] == "DE"
 assert ss["countryFlag"] == "🇩🇪"
-assert "Shadowsocks" in ss["detail"]
+assert ss["endpoint"] == "127.0.0.1:51821"
+assert ss["adBlock"] == "Blocky"
+assert ss["rateLimit"] == ""
 assert ss["active"] is False
 assert rows["eg-aabbccddeeff"]["obfuscation"] == "udp2raw"
 PY
@@ -207,4 +209,15 @@ fi
 
 "${ENGINE[@]}" down eg-aabbccddeeff >/dev/null
 "${ENGINE[@]}" down 1.2.3.4 >/dev/null
+"${ENGINE[@]}" delete eg-aabbccddeeff >/dev/null
+if [[ -d "$CONTINUUM_VPN_CONFIG_DIR/profiles/eg-aabbccddeeff" ]]; then
+  echo "deleted profile directory remains" >&2
+  exit 1
+fi
+python3 - "$("${ENGINE[@]}" list)" <<'PY'
+import json, sys
+rows = {row["iface"]: row for row in json.loads(sys.argv[1])}
+assert "eg-aabbccddeeff" not in rows
+assert "1.2.3.4" in rows
+PY
 echo "ok"

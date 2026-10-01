@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import threading
 import time
 import urllib.request
 
@@ -116,7 +117,7 @@ def run_tray() -> int:
         if ui["window"] is not None:
             return ui["window"]
         window = Gtk.Window(title="Continuum VPN")
-        window.set_default_size(380, 560)
+        window.set_default_size(560, 680)
         window.set_resizable(True)
         window.set_position(Gtk.WindowPosition.NONE)
         window.set_skip_taskbar_hint(True)
@@ -148,21 +149,18 @@ def run_tray() -> int:
         status = Gtk.Label(label="Disconnected")
         status.set_halign(Gtk.Align.START)
         status.set_line_wrap(True)
-        status.set_max_width_chars(36)
+        status.set_max_width_chars(48)
         status.set_margin_start(18)
         status.set_margin_end(18)
         status.set_margin_top(4)
-
-        connect = Gtk.Button.new_with_label("Connect")
-        connect.set_halign(Gtk.Align.START)
-        connect.set_margin_start(18)
-        connect.set_margin_end(18)
-        connect.set_margin_bottom(4)
-        connect.connect("clicked", on_connect)
+        status.set_margin_bottom(4)
 
         scrolled = Gtk.ScrolledWindow()
         scrolled.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        scrolled.set_propagate_natural_height(False)
         scrolled.set_min_content_height(180)
+        scrolled.set_overlay_scrolling(False)
+        scrolled.set_shadow_type(Gtk.ShadowType.IN)
         scrolled.add(profile_box)
 
         actions = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
@@ -173,7 +171,6 @@ def run_tray() -> int:
         root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
         root.pack_start(hero, False, False, 0)
         root.pack_start(status, False, False, 0)
-        root.pack_start(connect, False, False, 0)
         root.pack_start(scrolled, True, True, 0)
         root.pack_start(actions, False, False, 0)
         window.add(root)
@@ -181,10 +178,44 @@ def run_tray() -> int:
         add_button(actions, "Paste bundle", on_paste)
         add_button(actions, "Check for updates", on_update)
         add_button(actions, "Quit", lambda *_: Gtk.main_quit())
+        style = Gtk.CssProvider()
+        style.load_from_data(
+            b"""
+            button.on-button, button.on-button:disabled {
+              background-image: none;
+              background-color: #1e8e3e;
+              color: #ffffff;
+              border-color: #146c2e;
+              font-weight: bold;
+              opacity: 1;
+            }
+            button.off-button, button.off-button:disabled {
+              background-image: none;
+              background-color: #c5221f;
+              color: #ffffff;
+              border-color: #8c1d18;
+              font-weight: bold;
+              opacity: 1;
+            }
+            button.on-button label, button.off-button label,
+            button.on-button:disabled label, button.off-button:disabled label {
+              color: #ffffff;
+              font-weight: bold;
+            }
+            button.on-button.is-current, button.off-button.is-current {
+              border-width: 3px;
+              border-color: #ffffff;
+            }
+            """
+        )
+        Gtk.StyleContext.add_provider_for_screen(
+            window.get_screen(),
+            style,
+            Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION,
+        )
         ui["window"] = window
         ui["profile_box"] = profile_box
         ui["status_label"] = status
-        ui["connect_button"] = connect
         rebuild.signature = None
         rebuild()
         return window
@@ -199,6 +230,10 @@ def run_tray() -> int:
             monitor = display.get_monitor(0)
         if monitor is not None:
             area = monitor.get_workarea()
+            limit = max(520, area.height - 16)
+            if height > limit:
+                window.resize(width, limit)
+                width, height = window.get_size()
             window.move(area.x + area.width - width - 12, area.y + 8)
 
     def present_window() -> None:
@@ -235,81 +270,175 @@ def run_tray() -> int:
         box.pack_start(button, False, False, 0)
 
     def profile_caption(row: dict) -> str:
-        label = str(row.get("label") or row.get("iface") or "")
-        code = str(row.get("countryCode") or "")
-        if not code:
-            return label
-        flag = str(row.get("countryFlag") or "")
-        return f"{flag} {code}  {label}".strip()
+        return str(row.get("label") or row.get("iface") or "")
 
-    def profile_detail(row: dict) -> str:
-        stored = str(row.get("detail") or "").strip()
-        if stored:
-            return stored
-        obfuscation = str(row.get("obfuscation") or "none")
+    def obfuscation_label(row: dict) -> str:
         names = {
-            "shadowsocks": "WireGuard, with Shadowsocks",
-            "wg_obfuscator": "WireGuard, with wg-obfuscator",
-            "lwo": "WireGuard, with LWO",
-            "udp2raw": "WireGuard, with udp2raw",
+            "none": "None",
+            "shadowsocks": "Shadowsocks",
+            "wg_obfuscator": "wg-obfuscator",
+            "lwo": "LWO",
+            "udp2raw": "udp2raw",
         }
-        return names.get(obfuscation, "WireGuard")
+        return names.get(str(row.get("obfuscation") or "none"), str(row.get("obfuscation") or "None"))
 
-    def selected_row() -> dict | None:
-        iface = ui.get("selected")
-        for row in ui.get("rows") or []:
-            if row.get("iface") == iface:
-                return row
-        return None
+    def blank(value: str) -> str:
+        text = str(value or "").strip()
+        return text or "—"
+
+    def set_profile(iface: str, turn_on: bool) -> None:
+        ui["selected"] = iface
+        row = next((item for item in ui.get("rows") or [] if item.get("iface") == iface), None)
+        if row is None:
+            return
+        if bool(row.get("active")) == turn_on:
+            return
+        if turn_on:
+            call(engine.up_profile, iface)
+        else:
+            call(engine.down_profile, iface)
+        rebuild.signature = None
+        rebuild()
 
     def refresh_connection_controls() -> None:
-        row = selected_row()
-        button = ui.get("connect_button")
         status = ui.get("status_label")
+        if status is None:
+            return
         active = next((item for item in ui.get("rows") or [] if item.get("active")), None)
-        if status is not None:
-            if active:
-                status.set_text(f"Connected to {profile_caption(active)}")
-            else:
-                status.set_text("Disconnected")
-        if button is None:
-            return
-        if row is None:
-            button.set_label("Connect")
-            button.set_sensitive(False)
-            return
-        button.set_sensitive(True)
-        caption = profile_caption(row)
-        button.set_label(("Disconnect " if row.get("active") else "Connect ") + caption)
+        if active:
+            status.set_text(f"Connected to {profile_caption(active)}")
+        else:
+            status.set_text("Disconnected")
 
-    def choose_profile(button, iface: str) -> None:
-        if button.get_active():
-            ui["selected"] = iface
-            refresh_connection_controls()
+    def add_param(grid: Gtk.Grid, row_index: int, name: str, value: str) -> None:
+        key = Gtk.Label(label=name)
+        key.set_halign(Gtk.Align.START)
+        key.set_xalign(0)
+        key.get_style_context().add_class("dim-label")
+        shown = Gtk.Label(label=blank(value))
+        shown.set_halign(Gtk.Align.START)
+        shown.set_xalign(0)
+        shown.set_selectable(True)
+        grid.attach(key, 1, row_index, 1, 1)
+        grid.attach(shown, 2, row_index, 1, 1)
 
-    def on_connect(*_args) -> None:
-        row = selected_row()
-        if row is None:
-            alert("Choose a profile first.")
+    def add_profile_card(box: Gtk.Box, row: dict) -> None:
+        iface = str(row["iface"])
+        active = bool(row.get("active"))
+        card = Gtk.Frame()
+        grid = Gtk.Grid()
+        grid.set_column_spacing(16)
+        grid.set_row_spacing(4)
+        grid.set_margin_top(10)
+        grid.set_margin_bottom(10)
+        grid.set_margin_start(10)
+        grid.set_margin_end(10)
+        flag = Gtk.Label()
+        mark = str(row.get("countryFlag") or "—")
+        flag.set_markup(f"<span size='xx-large'>{mark}</span>")
+        flag.set_valign(Gtk.Align.CENTER)
+        flag.set_halign(Gtk.Align.CENTER)
+        flag.set_size_request(64, -1)
+        grid.attach(flag, 0, 0, 1, 6)
+        add_param(grid, 0, "Name", str(row.get("label") or iface))
+        add_param(grid, 1, "Country", str(row.get("countryCode") or ""))
+        add_param(grid, 2, "Obfuscation", obfuscation_label(row))
+        add_param(grid, 3, "Ad blocking", str(row.get("adBlock") or ""))
+        add_param(grid, 4, "Rate limit", str(row.get("rateLimit") or ""))
+        add_param(grid, 5, "Endpoint", str(row.get("endpoint") or ""))
+        buttons = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        buttons.set_valign(Gtk.Align.CENTER)
+        buttons.set_margin_start(8)
+        on_button = Gtk.Button.new_with_label("ON")
+        off_button = Gtk.Button.new_with_label("OFF")
+        for button, css in ((on_button, "on-button"), (off_button, "off-button")):
+            button.set_size_request(88, 42)
+            button.get_style_context().add_class(css)
+        if active:
+            on_button.get_style_context().add_class("is-current")
+        else:
+            off_button.get_style_context().add_class("is-current")
+        on_button.connect("clicked", lambda *_b, iface=iface: set_profile(iface, True))
+        off_button.connect("clicked", lambda *_b, iface=iface: set_profile(iface, False))
+        buttons.pack_start(on_button, False, False, 0)
+        buttons.pack_start(off_button, False, False, 0)
+        grid.attach(buttons, 3, 0, 1, 6)
+        trash = Gtk.Button()
+        trash.set_image(Gtk.Image.new_from_icon_name("user-trash-symbolic", Gtk.IconSize.BUTTON))
+        trash.set_tooltip_text("Delete")
+        trash.set_relief(Gtk.ReliefStyle.NONE)
+        trash.set_valign(Gtk.Align.CENTER)
+        trash.connect("clicked", lambda *_b, row=row: ask_delete(row))
+        grid.attach(trash, 4, 0, 1, 6)
+        card.add(grid)
+        box.pack_start(card, False, False, 0)
+
+    def ask_delete(row: dict) -> None:
+        label = str(row.get("label") or row.get("iface") or "this VPN")
+        dialog = Gtk.MessageDialog(
+            transient_for=ensure_window(),
+            flags=0,
+            message_type=Gtk.MessageType.QUESTION,
+            buttons=Gtk.ButtonsType.NONE,
+            text=f"Delete {label}?",
+        )
+        dialog.format_secondary_text("This removes the saved VPN from this computer.")
+        dialog.add_button("Cancel", Gtk.ResponseType.CANCEL)
+        dialog.add_button("Delete", Gtk.ResponseType.ACCEPT)
+        accepted = dialog.run() == Gtk.ResponseType.ACCEPT
+        dialog.destroy()
+        if not accepted:
             return
         iface = str(row["iface"])
-        if row.get("active"):
-            call(engine.down_profile, iface)
-        else:
-            call(engine.up_profile, iface)
-        rebuild.signature = None
-        rebuild()
+        ui["busy"] = True
 
-    def toggle_profile(iface: str, active: bool):
-        ui["selected"] = iface
-        if active:
-            call(engine.down_profile, iface)
-        else:
-            call(engine.up_profile, iface)
-        rebuild.signature = None
-        rebuild()
+        def work() -> None:
+            error = ""
+            try:
+                engine.delete_profile(iface)
+            except engine.EngineError as exc:
+                error = str(exc)
+
+            def done() -> bool:
+                ui["busy"] = False
+                if error:
+                    alert(error)
+                rebuild.signature = None
+                rebuild()
+                return False
+
+            GLib.idle_add(done)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def start_import(text: str, name: str) -> None:
+        ui["busy"] = True
+        status = ui.get("status_label")
+        if status is not None:
+            status.set_text("Importing…")
+
+        def work() -> None:
+            error = ""
+            try:
+                engine.import_text(text, name)
+            except engine.EngineError as exc:
+                error = str(exc)
+
+            def done() -> bool:
+                ui["busy"] = False
+                if error:
+                    alert(error)
+                rebuild.signature = None
+                rebuild()
+                return False
+
+            GLib.idle_add(done)
+
+        threading.Thread(target=work, daemon=True).start()
 
     def rebuild(*_args) -> bool:
+        if ui.get("busy"):
+            return True
         try:
             rows = engine.list_profiles()
         except engine.EngineError as exc:
@@ -346,28 +475,8 @@ def run_tray() -> int:
                 label.set_max_width_chars(36)
                 label.set_halign(Gtk.Align.START)
                 profile_box.pack_start(label, False, False, 0)
-            group = None
             for row in shown:
-                iface = row["iface"]
-                block = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
-                caption = profile_caption(row)
-                if row.get("active"):
-                    caption = f"{caption}  ·  connected"
-                radio = Gtk.RadioButton.new_with_label_from_widget(group, caption)
-                if group is None:
-                    group = radio
-                radio.set_halign(Gtk.Align.START)
-                radio.set_active(iface == ui.get("selected"))
-                radio.connect("toggled", lambda button, iface=iface: choose_profile(button, iface))
-                detail = Gtk.Label(label=profile_detail(row))
-                detail.set_line_wrap(True)
-                detail.set_max_width_chars(38)
-                detail.set_xalign(0)
-                detail.set_margin_start(24)
-                detail.get_style_context().add_class("dim-label")
-                block.pack_start(radio, False, False, 0)
-                block.pack_start(detail, False, False, 0)
-                profile_box.pack_start(block, False, False, 0)
+                add_profile_card(profile_box, row)
             refresh_connection_controls()
 
         menu = Gtk.Menu()
@@ -397,10 +506,10 @@ def run_tray() -> int:
             for row in shown:
                 iface = row["iface"]
                 active = bool(row.get("active"))
-                verb = "Disconnect" if active else "Connect"
+                verb = "OFF" if active else "ON"
                 menu_item(
                     f"{verb} {profile_caption(row)}",
-                    lambda _item, iface=iface, active=active: toggle_profile(iface, active),
+                    lambda _item, iface=iface, turn_on=not active: set_profile(iface, turn_on),
                 )
         sep()
         menu_item("Import bundle…", on_import)
@@ -447,14 +556,16 @@ def run_tray() -> int:
             return None
 
     def on_import(*_args) -> None:
+        # A blocking file dialog stops the window answering the desktop, so
+        # GNOME reports that Continuum VPN is not responding.
         present_window()
-        chooser = Gtk.FileChooserDialog(
-            title="Import Continuum VPN bundle",
-            transient_for=ui["window"],
-            action=Gtk.FileChooserAction.OPEN,
+        chooser = Gtk.FileChooserNative.new(
+            "Import Continuum VPN bundle",
+            ui["window"],
+            Gtk.FileChooserAction.OPEN,
+            "Import",
+            "Cancel",
         )
-        chooser.add_button("Cancel", Gtk.ResponseType.CANCEL)
-        chooser.add_button("Import", Gtk.ResponseType.ACCEPT)
         bundle_filter = Gtk.FileFilter()
         bundle_filter.set_name("Continuum VPN bundle")
         for pattern in (
@@ -474,12 +585,16 @@ def run_tray() -> int:
         downloads = GLib.get_user_special_dir(GLib.UserDirectory.DIRECTORY_DOWNLOAD)
         if downloads:
             chooser.set_current_folder(downloads)
-        if chooser.run() == Gtk.ResponseType.ACCEPT:
-            chosen = read_chosen_file(chooser)
-            if chosen is not None and call(engine.import_text, chosen[1], chosen[0]) is not None:
-                rebuild.signature = None
-                rebuild()
-        chooser.destroy()
+
+        def on_response(_native, response) -> None:
+            if response == Gtk.ResponseType.ACCEPT:
+                chosen = read_chosen_file(chooser)
+                if chosen is not None:
+                    start_import(chosen[1], chosen[0])
+            chooser.destroy()
+
+        chooser.connect("response", on_response)
+        chooser.show()
 
     def on_paste(*_args) -> None:
         present_window()

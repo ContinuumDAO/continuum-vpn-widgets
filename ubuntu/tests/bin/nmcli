@@ -45,7 +45,7 @@ def main() -> int:
             "id": iface,
             "iface": iface,
             "type": "wireguard",
-            "active": False,
+            "active": True,
             "autoconnect": True,
         }
         save(db)

@@ -133,6 +133,32 @@ def flag_for(code: str) -> str:
     return chr(0x1F1E6 + ord(code[0]) - ord("A")) + chr(0x1F1E6 + ord(code[1]) - ord("A"))
 
 
+def wg_assignment(text: str, key: str) -> str:
+    wanted = key.lower()
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        name, value = line.split("=", 1)
+        if name.strip().lower() == wanted:
+            return value.strip()
+    return ""
+
+
+def rate_label(detail: str) -> str:
+    match = re.search(r"limited to ([0-9]+(?:\.[0-9]+)?) Mbps", detail)
+    if not match:
+        return ""
+    return f"{match.group(1)} Mbps"
+
+
+def ad_block_label(detail: str) -> str:
+    match = re.search(r"ad/tracking blocking with ([A-Za-z0-9.+-]+)", detail)
+    if not match:
+        return ""
+    return match.group(1)
+
+
 def check_private_key(key: str) -> None:
     try:
         subprocess.run(
@@ -518,13 +544,18 @@ def save_meta(directory: str, meta: dict[str, Any]) -> None:
 
 
 def nm(*args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        ["nmcli", *args],
-        check=check,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
+    slow = len(args) >= 2 and args[0] == "connection" and args[1] in {"up", "down", "import", "delete", "modify"}
+    try:
+        return subprocess.run(
+            ["nmcli", *args],
+            check=check,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=45 if slow else 8,
+        )
+    except subprocess.TimeoutExpired:
+        fail("NetworkManager did not respond")
 
 
 def import_staged(profile_dir: str, meta: dict[str, Any]) -> str:
@@ -572,6 +603,8 @@ def import_staged(profile_dir: str, meta: dict[str, Any]) -> str:
     )
     if modified.returncode != 0:
         fail(modified.stderr.strip() or "NetworkManager did not update the connection")
+    # Import brings a WireGuard profile up. Leave it saved until the user connects.
+    nm("connection", "down", uuid, check=False)
     meta["nmUuid"] = uuid
     save_meta(profile_dir, meta)
     return label
@@ -620,14 +653,23 @@ def list_profiles() -> list[dict[str, Any]]:
         with open(meta_path, encoding="utf-8") as handle:
             meta = json.load(handle)
         code = str(meta.get("countryCode") or "")
+        detail = str(meta.get("detail") or "").strip()
+        wg_text = ""
+        wg_path = os.path.join(profiles, name, "wg.conf")
+        if os.path.isfile(wg_path):
+            with open(wg_path, encoding="utf-8") as handle:
+                wg_text = handle.read()
         rows.append(
             {
                 "iface": meta.get("iface") or name,
                 "label": meta.get("label") or name,
                 "countryCode": code,
                 "countryFlag": flag_for(code),
-                "detail": str(meta.get("detail") or "").strip(),
+                "detail": detail,
                 "obfuscation": meta.get("obfuscation") or "none",
+                "adBlock": ad_block_label(detail),
+                "rateLimit": rate_label(detail),
+                "endpoint": wg_assignment(wg_text, "Endpoint"),
                 "active": connection_active(str(meta.get("nmUuid") or "")),
             }
         )
@@ -763,6 +805,29 @@ def down_profile(iface: str, *, missing_ok: bool = False) -> str:
     return str(meta.get("label") or iface)
 
 
+def delete_profile(iface: str) -> str:
+    if not IFACE_RE.fullmatch(iface):
+        fail(f"unknown profile {iface}")
+    _, profiles, _ = ensure_dirs()
+    directory, meta = load_meta(profiles, iface)
+    label = str(meta.get("label") or iface)
+    uuid = str(meta.get("nmUuid") or "")
+    down_profile(iface, missing_ok=True)
+    if uuid:
+        nm("connection", "delete", uuid, check=False)
+    listed = nm("-t", "-f", "UUID,TYPE", "connection", "show", check=False)
+    for line in listed.stdout.splitlines():
+        ident, _, typ = line.partition(":")
+        if typ != "wireguard" or not ident:
+            continue
+        ifn = nm("-g", "connection.interface-name", "connection", "show", ident, check=False).stdout.strip()
+        name = nm("-g", "connection.id", "connection", "show", ident, check=False).stdout.strip()
+        if ifn == iface or name == iface or name == label:
+            nm("connection", "delete", ident, check=False)
+    shutil.rmtree(directory, ignore_errors=True)
+    return label
+
+
 def up_profile(iface: str) -> str:
     _, profiles, runtime = ensure_dirs()
     directory, meta = load_meta(profiles, iface)
@@ -845,11 +910,13 @@ def main(argv: list[str]) -> int:
             print(up_profile(argv[2]))
         elif command == "down" and len(argv) == 3:
             print(down_profile(argv[2]))
+        elif command == "delete" and len(argv) == 3:
+            print(delete_profile(argv[2]))
         elif command == "check-update":
             found = newer_release()
             print(json.dumps(found or {}))
         else:
-            fail("usage: engine.py list|up IFACE|down IFACE|import-file PATH|import-text [NAME]|check-update")
+            fail("usage: engine.py list|up IFACE|down IFACE|delete IFACE|import-file PATH|import-text [NAME]|check-update")
     except EngineError as exc:
         print(str(exc), file=sys.stderr)
         return 1
