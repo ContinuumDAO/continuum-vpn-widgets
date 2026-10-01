@@ -102,11 +102,13 @@ def ensure_dirs() -> tuple[str, str, str]:
     root = config_dir()
     profiles = os.path.join(root, "profiles")
     runtime = runtime_dir()
-    os.makedirs(profiles, mode=0o700, exist_ok=True)
-    os.makedirs(runtime, mode=0o700, exist_ok=True)
-    os.chmod(root, 0o700)
-    os.chmod(profiles, 0o700)
-    os.chmod(runtime, 0o700)
+    for path in (root, profiles, runtime):
+        if not os.path.isdir(path):
+            os.makedirs(path, mode=0o700, exist_ok=True)
+        # chmod changes the directory ctime. Doing that on every refresh makes
+        # the desktop notice the widget several times a minute.
+        if os.stat(path).st_mode & 0o777 != 0o700:
+            os.chmod(path, 0o700)
     return root, profiles, runtime
 
 
