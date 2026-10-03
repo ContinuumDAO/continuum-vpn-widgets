@@ -707,6 +707,10 @@ def run_tray() -> int:
             return
         if found.get("format") == "pacman":
             install = ["pkexec", "pacman", "-U", "--noconfirm", dest]
+        elif found.get("format") == "rpm":
+            install = ["pkexec", "dnf", "install", "-y", dest]
+        elif found.get("format") == "zypper":
+            install = ["pkexec", "zypper", "--non-interactive", "install", "--allow-unsigned-rpm", dest]
         else:
             install = ["pkexec", "apt-get", "install", "-y", dest]
         result = os.spawnvp(os.P_WAIT, "pkexec", install)

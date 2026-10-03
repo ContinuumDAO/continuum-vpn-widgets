@@ -1,0 +1,505 @@
+#!/usr/bin/env python3
+"""Root helper for the macOS Continuum VPN app.
+
+Starts the bundled wireguard-go userspace tunnel from a sanitized config.
+Hook lines are refused. udp2raw is not part of this helper.
+"""
+
+from __future__ import annotations
+
+import base64
+import ipaddress
+import json
+import os
+import re
+import signal
+import socket
+import stat
+import subprocess
+import sys
+import time
+
+LIB_DIR = os.path.dirname(os.path.realpath(__file__))
+WG_GO = os.path.join(LIB_DIR, "bin", "wireguard-go")
+HOST_RE = re.compile(r"^[A-Za-z0-9.:-]{1,253}$")
+HOOKS = {"preup", "postup", "predown", "postdown"}
+IFACE_KEYS = {"privatekey", "address", "dns", "listenport", "mtu", "fwmark", "table"}
+PEER_KEYS = {"publickey", "presharedkey", "allowedips", "endpoint", "persistentkeepalive"}
+
+
+def die(message: str) -> None:
+    print(message, file=sys.stderr)
+    raise SystemExit(1)
+
+
+def private_file(path: str) -> None:
+    if not os.path.isabs(path):
+        die("path must be absolute")
+    try:
+        info = os.lstat(path)
+    except OSError as exc:
+        die(str(exc))
+    if stat.S_ISLNK(info.st_mode):
+        die("refusing a symlink")
+    if not stat.S_ISREG(info.st_mode):
+        die("path is not a file")
+    if info.st_mode & 0o022:
+        die("file is group or world writable")
+    parent = os.lstat(os.path.dirname(path))
+    if stat.S_ISLNK(parent.st_mode) or not stat.S_ISDIR(parent.st_mode):
+        die("parent is not a directory")
+    if parent.st_mode & 0o022:
+        die("directory is group or world writable")
+
+
+def load_json(path: str) -> dict:
+    private_file(path)
+    with open(path, encoding="utf-8") as handle:
+        data = json.load(handle)
+    if not isinstance(data, dict):
+        die("request must be a JSON object")
+    return data
+
+
+def check_host(host: str) -> str:
+    if not isinstance(host, str) or not HOST_RE.fullmatch(host) or ".." in host or host.startswith("-"):
+        die("host is not a name or address")
+    return host
+
+
+def key_hex(value: str) -> str:
+    try:
+        raw = base64.b64decode(value.strip(), validate=True)
+    except Exception:
+        die("WireGuard key is not valid base64")
+    if len(raw) != 32:
+        die("WireGuard key is not 32 bytes")
+    return raw.hex()
+
+
+def parse_conf(text: str) -> dict:
+    section = None
+    interface: dict[str, str] = {}
+    peers: list[dict[str, str]] = []
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or line.startswith(";"):
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            name = line[1:-1].strip().lower()
+            if name == "interface":
+                section = "interface"
+            elif name == "peer":
+                peers.append({})
+                section = "peer"
+            else:
+                die(f"unknown section [{line[1:-1].strip()}]")
+            continue
+        if "=" not in line or section is None:
+            die(f"invalid line: {line}")
+        key, value = line.split("=", 1)
+        key_name = key.strip()
+        value = value.strip()
+        if key_name.lower() in HOOKS:
+            die("refusing a WireGuard hook")
+        if section == "interface":
+            if key_name.lower() not in IFACE_KEYS:
+                die(f"unknown interface key {key_name}")
+            interface[key_name] = value
+        else:
+            if key_name.lower() not in PEER_KEYS:
+                die(f"unknown peer key {key_name}")
+            peers[-1][key_name] = value
+    if "PrivateKey" not in interface:
+        die("interface is missing PrivateKey")
+    if not peers or any("PublicKey" not in peer for peer in peers):
+        die("a peer PublicKey is required")
+    return {"interface": interface, "peers": peers}
+
+
+def split_csv(value: str) -> list[str]:
+    return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def resolve_endpoint(endpoint: str) -> str:
+    if endpoint.startswith("["):
+        host, _, port = endpoint[1:].rpartition("]:")
+    else:
+        host, _, port = endpoint.rpartition(":")
+    if not host or not port:
+        die("peer endpoint is invalid")
+    try:
+        port_n = int(port)
+    except ValueError:
+        die("peer endpoint port is invalid")
+    if not 1 <= port_n <= 65535:
+        die("peer endpoint port is invalid")
+    try:
+        infos = socket.getaddrinfo(host, port_n, type=socket.SOCK_DGRAM)
+    except socket.gaierror:
+        die(f"could not resolve {host}")
+    if not infos:
+        die(f"could not resolve {host}")
+    address = str(infos[0][4][0])
+    if ":" in address:
+        return f"[{address}]:{port_n}"
+    return f"{address}:{port_n}"
+
+
+def uapi_message(parsed: dict) -> str:
+    interface = parsed["interface"]
+    lines = ["set=1", "private_key=" + key_hex(interface["PrivateKey"])]
+    if interface.get("ListenPort"):
+        lines.append("listen_port=" + interface["ListenPort"])
+    if interface.get("FwMark"):
+        lines.append("fwmark=" + interface["FwMark"])
+    lines.append("replace_peers=true")
+    for peer in parsed["peers"]:
+        lines.append("public_key=" + key_hex(peer["PublicKey"]))
+        if peer.get("PresharedKey"):
+            lines.append("preshared_key=" + key_hex(peer["PresharedKey"]))
+        if peer.get("Endpoint"):
+            lines.append("endpoint=" + resolve_endpoint(peer["Endpoint"]))
+        if peer.get("PersistentKeepalive"):
+            lines.append("persistent_keepalive_interval=" + peer["PersistentKeepalive"])
+        lines.append("replace_allowed_ips=true")
+        for cidr in split_csv(peer.get("AllowedIPs", "")):
+            lines.append("allowed_ip=" + cidr)
+    return "\n".join(lines) + "\n\n"
+
+
+def sock_dir() -> str:
+    override = os.environ.get("CONTINUUM_VPN_WG_SOCK_DIR")
+    if override:
+        return override
+    return "/var/run/wireguard"
+
+
+def run(argv: list[str]) -> None:
+    result = subprocess.run(argv, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+    if result.returncode != 0:
+        die(result.stderr.strip() or result.stdout.strip() or f"{argv[0]} failed")
+
+
+def netmask(prefix: int) -> str:
+    if not 0 <= prefix <= 32:
+        die("IPv4 prefix is invalid")
+    bits = (0xFFFFFFFF << (32 - prefix)) & 0xFFFFFFFF if prefix else 0
+    return ".".join(str((bits >> shift) & 0xFF) for shift in (24, 16, 8, 0))
+
+
+def assign_address(utun: str, cidr: str) -> None:
+    ip, sep, prefix = cidr.partition("/")
+    if not sep:
+        die(f"address {cidr} needs a prefix")
+    try:
+        parsed = ipaddress.ip_address(ip)
+        length = int(prefix)
+    except ValueError:
+        die(f"address {cidr} is invalid")
+    if isinstance(parsed, ipaddress.IPv6Address):
+        run(["ifconfig", utun, "inet6", ip, "prefixlen", str(length)])
+    else:
+        run(["ifconfig", utun, "inet", ip, ip, "netmask", netmask(length)])
+
+
+def add_route(utun: str, cidr: str) -> list[str]:
+    if cidr == "0.0.0.0/0":
+        commands = [
+            ["route", "-n", "add", "-net", "0.0.0.0/1", "-interface", utun],
+            ["route", "-n", "add", "-net", "128.0.0.0/1", "-interface", utun],
+        ]
+    elif cidr == "::/0":
+        commands = [
+            ["route", "-n", "add", "-inet6", "-net", "::/1", "-interface", utun],
+            ["route", "-n", "add", "-inet6", "-net", "8000::/1", "-interface", utun],
+        ]
+    elif ":" in cidr:
+        commands = [["route", "-n", "add", "-inet6", "-net", cidr, "-interface", utun]]
+    else:
+        commands = [["route", "-n", "add", "-net", cidr, "-interface", utun]]
+    for argv in commands:
+        run(argv)
+    return [" ".join(argv) for argv in commands]
+
+
+def default_gateway() -> str:
+    result = subprocess.run(
+        ["route", "-n", "get", "default"],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    for line in result.stdout.splitlines():
+        if "gateway:" in line:
+            return line.split()[-1]
+    die("no default route")
+    return ""
+
+
+def route_add(data: dict) -> None:
+    host = check_host(str(data.get("host") or ""))
+    gateway = default_gateway()
+    run(["route", "-n", "add", "-host", host, gateway])
+
+
+def route_del(data: dict) -> None:
+    host = check_host(str(data.get("host") or ""))
+    subprocess.run(
+        ["route", "-n", "delete", "-host", host],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+
+
+def set_dns(utun: str, servers: list[str]) -> None:
+    if not servers:
+        return
+    for server in servers:
+        check_host(server)
+    script = "\n".join(
+        [
+            "d.init",
+            "d.add ServerAddresses * " + " ".join(servers),
+            f"d.add InterfaceName {utun}",
+            "set State:/Network/Service/continuum-vpn/DNS",
+            "",
+        ]
+    )
+    result = subprocess.run(["scutil"], input=script, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+    if result.returncode != 0:
+        die(result.stderr.strip() or "could not set DNS")
+
+
+def clear_dns() -> None:
+    subprocess.run(
+        ["scutil"],
+        input="remove State:/Network/Service/continuum-vpn/DNS\n",
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+
+
+def process_is_wireguard(pid: int) -> bool:
+    if pid <= 1:
+        return False
+    expected = os.path.realpath(WG_GO)
+    raw: list[bytes] = []
+    try:
+        if os.path.realpath(f"/proc/{pid}/exe") == expected:
+            return True
+    except OSError:
+        pass
+    try:
+        raw = open(f"/proc/{pid}/cmdline", "rb").read().split(b"\0")
+    except OSError:
+        raw = []
+    for part in raw:
+        if not part:
+            continue
+        try:
+            if os.path.realpath(part.decode()) == expected:
+                return True
+        except (OSError, ValueError):
+            continue
+    if sys.platform == "darwin":
+        listed = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "command="],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+        command = listed.stdout.strip().split()
+        if command:
+            try:
+                return os.path.realpath(command[0]) == expected
+            except OSError:
+                return False
+    return False
+
+
+def stop_pid(pid: int) -> None:
+    if not process_is_wireguard(pid):
+        return
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except OSError:
+        return
+    for _ in range(30):
+        try:
+            os.kill(pid, 0)
+        except OSError:
+            return
+        time.sleep(0.1)
+    if process_is_wireguard(pid):
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except OSError:
+            pass
+
+
+def read_interface_name(proc: subprocess.Popen[str]) -> str:
+    assert proc.stdout is not None
+    deadline = time.time() + 8
+    buffer = ""
+    while time.time() < deadline:
+        if proc.poll() is not None:
+            die(buffer.strip() or "wireguard-go exited")
+        line = proc.stdout.readline()
+        if not line:
+            time.sleep(0.05)
+            continue
+        buffer += line
+        created = re.search(r"Interface created:\s*(utun\d+)", buffer)
+        if created:
+            return created.group(1)
+        prefixed = re.search(r"\((utun\d+)\)", buffer)
+        if prefixed:
+            return prefixed.group(1)
+    die("wireguard-go did not name the tunnel")
+    return ""
+
+
+def apply_uapi(utun: str, message: str) -> None:
+    path = os.path.join(sock_dir(), f"{utun}.sock")
+    last = "WireGuard did not accept the config"
+    for _ in range(50):
+        try:
+            client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            client.settimeout(2)
+            client.connect(path)
+            client.sendall(message.encode())
+            reply = b""
+            while b"\n\n" not in reply and len(reply) < 4096:
+                chunk = client.recv(1024)
+                if not chunk:
+                    break
+                reply += chunk
+            client.close()
+        except OSError as exc:
+            last = str(exc)
+            time.sleep(0.1)
+            continue
+        if b"errno=0" in reply:
+            return
+        die(reply.decode(errors="replace").strip() or "WireGuard rejected the config")
+    die(last)
+
+
+def own_state(path: str) -> None:
+    parent = os.path.dirname(path)
+    info = os.stat(parent)
+    os.chown(path, info.st_uid, info.st_gid)
+    os.chmod(path, 0o600)
+
+
+def tunnel_up(data: dict) -> None:
+    config = str(data.get("config") or "")
+    state_path = str(data.get("stateFile") or "")
+    iface = str(data.get("iface") or "")
+    if not config or not state_path:
+        die("tunnel-up needs config and stateFile")
+    if not re.fullmatch(r"[A-Za-z0-9_=+.\-]{1,15}", iface):
+        die("iface is invalid")
+    private_file(config)
+    binary = os.path.realpath(WG_GO)
+    if not os.path.isfile(binary) or not os.access(binary, os.X_OK):
+        die("bundled wireguard-go is missing")
+    with open(config, encoding="utf-8") as handle:
+        parsed = parse_conf(handle.read())
+    message = uapi_message(parsed)
+    env = os.environ.copy()
+    env["LOG_LEVEL"] = "verbose"
+    env["WG_PROCESS_FOREGROUND"] = "1"
+    proc = subprocess.Popen(
+        [binary, "-f", "utun"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        stdin=subprocess.DEVNULL,
+        text=True,
+        env=env,
+        start_new_session=True,
+    )
+    try:
+        utun = read_interface_name(proc)
+        apply_uapi(utun, message)
+        interface = parsed["interface"]
+        for cidr in split_csv(interface.get("Address", "")):
+            assign_address(utun, cidr)
+        if interface.get("MTU"):
+            run(["ifconfig", utun, "mtu", interface["MTU"]])
+        routes: list[str] = []
+        for peer in parsed["peers"]:
+            for cidr in split_csv(peer.get("AllowedIPs", "")):
+                routes.extend(add_route(utun, cidr))
+        dns = split_csv(interface.get("DNS", ""))
+        set_dns(utun, dns)
+    except SystemExit:
+        stop_pid(proc.pid)
+        raise
+    parent = os.path.dirname(state_path)
+    os.makedirs(parent, mode=0o700, exist_ok=True)
+    with open(state_path, "w", encoding="utf-8") as handle:
+        json.dump(
+            {"active": True, "iface": iface, "utun": utun, "pid": proc.pid, "routes": routes, "dns": bool(dns)},
+            handle,
+        )
+        handle.write("\n")
+    own_state(state_path)
+
+
+def tunnel_down(data: dict) -> None:
+    state_path = str(data.get("stateFile") or "")
+    if not state_path or not os.path.isabs(state_path) or not os.path.isfile(state_path):
+        return
+    try:
+        private_file(state_path)
+        with open(state_path, encoding="utf-8") as handle:
+            state = json.load(handle)
+    except (OSError, json.JSONDecodeError, SystemExit):
+        return
+    if not isinstance(state, dict):
+        return
+    pid = int(state.get("pid") or 0)
+    if pid:
+        stop_pid(pid)
+    for command in state.get("routes") or []:
+        if not isinstance(command, str) or not command.startswith("route "):
+            continue
+        argv = command.split()
+        argv[2] = "delete"
+        subprocess.run(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+    if state.get("dns"):
+        clear_dns()
+    try:
+        os.remove(state_path)
+    except OSError:
+        pass
+
+
+def main() -> int:
+    if len(sys.argv) != 3:
+        die("usage: priv-helper tunnel-up|tunnel-down|route-add|route-del REQUEST.json")
+    command, path = sys.argv[1], sys.argv[2]
+    data = load_json(path)
+    if command == "tunnel-up":
+        tunnel_up(data)
+    elif command == "tunnel-down":
+        tunnel_down(data)
+    elif command == "route-add":
+        route_add(data)
+    elif command == "route-del":
+        route_del(data)
+    else:
+        die(f"unknown command {command}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

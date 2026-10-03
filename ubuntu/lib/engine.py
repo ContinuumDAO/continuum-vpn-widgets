@@ -14,6 +14,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -42,6 +43,10 @@ HOST_RE = re.compile(r"^[A-Za-z0-9.:-]{1,253}$")
 RELEASE_API = "https://api.github.com/repos/ContinuumDAO/continuum-vpn-widgets/releases/latest"
 DEB_ASSET = "continuum-vpn-widget_amd64.deb"
 PKG_ASSET = "continuum-vpn-widget-x86_64.pkg.tar.zst"
+RPM_ASSET = "continuum-vpn-widget-x86_64.rpm"
+ZYPPER_ASSET = "continuum-vpn-widget-suse.x86_64.rpm"
+MAC_ARM_ASSET = "continuum-vpn-widget-macos-arm64.zip"
+MAC_X64_ASSET = "continuum-vpn-widget-macos-x64.zip"
 
 LIB_DIR = os.path.dirname(os.path.realpath(__file__))
 
@@ -75,6 +80,19 @@ def bin_dir() -> str:
     if override:
         return override
     return os.path.join(LIB_DIR, "bin")
+
+
+def uses_darwin_tunnel() -> bool:
+    override = os.environ.get("CONTINUUM_VPN_PLATFORM")
+    if override:
+        return override == "darwin"
+    return sys.platform == "darwin"
+
+
+def mac_arch_label(machine: str) -> str:
+    if machine in {"arm64", "aarch64"}:
+        return "arm64"
+    return "x64"
 
 
 def helper_path() -> str:
@@ -369,6 +387,8 @@ def bundle_from_json(text: str) -> dict[str, Any]:
         fail("lwo is not started by this widget")
     if obfuscation not in {"none", "shadowsocks", "wg_obfuscator", "udp2raw"}:
         fail(f"unsupported obfuscation {obfuscation}")
+    if uses_darwin_tunnel() and obfuscation == "udp2raw":
+        fail("udp2raw is not started by this widget")
     iface = str(data.get("iface") or "").strip()
     if not IFACE_RE.fullmatch(iface):
         fail("iface must be 1-15 characters from [A-Za-z0-9_=+.-]")
@@ -562,6 +582,8 @@ def nm(*args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
 def import_staged(profile_dir: str, meta: dict[str, Any]) -> str:
     iface = str(meta["iface"])
     label = str(meta["label"])
+    if uses_darwin_tunnel():
+        return label
     old = str(meta.get("nmUuid") or "")
     if old:
         nm("connection", "delete", old, check=False)
@@ -671,13 +693,28 @@ def list_profiles() -> list[dict[str, Any]]:
                 "adBlock": ad_block_label(detail),
                 "rateLimit": rate_label(detail),
                 "endpoint": wg_assignment(wg_text, "Endpoint"),
-                "active": connection_active(str(meta.get("nmUuid") or "")),
+                "active": profile_is_active(meta, name),
             }
         )
     return rows
 
 
 def port_listening(port: int) -> bool:
+    listen = os.environ.get("CONTINUUM_VPN_LISTEN_DIR")
+    if listen and os.path.isfile(os.path.join(listen, str(port))):
+        return True
+    if uses_darwin_tunnel():
+        import socket
+
+        probe_socket = socket.socket()
+        probe_socket.settimeout(0.2)
+        try:
+            probe_socket.connect(("127.0.0.1", port))
+        except OSError:
+            return False
+        finally:
+            probe_socket.close()
+        return True
     probe = subprocess.run(
         ["ss", "-l", "-n", "-H", f"sport = :{port}"],
         text=True,
@@ -763,7 +800,11 @@ def run_helper(command: str, payload: dict[str, Any]) -> None:
         fail("privileged helper is not installed")
     cmd = [helper, command, path]
     if os.environ.get("CONTINUUM_VPN_NO_PRIV") != "1":
-        cmd = ["pkexec", *cmd]
+        if uses_darwin_tunnel():
+            shell = " ".join(shlex.quote(part) for part in cmd)
+            cmd = ["osascript", "-e", "do shell script " + json.dumps(shell) + " with administrator privileges"]
+        else:
+            cmd = ["pkexec", *cmd]
     result = subprocess.run(cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
     if result.returncode != 0:
         detail = (result.stderr or result.stdout).strip()
@@ -780,7 +821,101 @@ def active_wg_uuids() -> list[str]:
     return found
 
 
+def darwin_state_path(iface: str) -> str:
+    return os.path.join(runtime_dir(), f"{iface}.tunnel")
+
+
+def darwin_tunnel_active(iface: str) -> bool:
+    path = darwin_state_path(iface)
+    if not os.path.isfile(path):
+        return False
+    try:
+        with open(path, encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return False
+    return bool(isinstance(data, dict) and data.get("active"))
+
+
+def profile_is_active(meta: dict[str, Any], name: str) -> bool:
+    if uses_darwin_tunnel():
+        return darwin_tunnel_active(str(meta.get("iface") or name))
+    return connection_active(str(meta.get("nmUuid") or ""))
+
+
+def down_profile_darwin(iface: str, *, missing_ok: bool = False) -> str:
+    _, profiles, _ = ensure_dirs()
+    directory = os.path.join(profiles, iface)
+    meta_path = os.path.join(directory, "meta.json")
+    if not os.path.isfile(meta_path):
+        if missing_ok:
+            return iface
+        fail(f"unknown profile {iface}")
+    with open(meta_path, encoding="utf-8") as handle:
+        meta = json.load(handle)
+    obfuscation = str(meta.get("obfuscation") or "none")
+    if obfuscation == "udp2raw":
+        fail("udp2raw is not started by this widget")
+    run_helper("tunnel-down", {"iface": iface, "stateFile": darwin_state_path(iface)})
+    stop_proxy(iface)
+    host = str(meta.get("bypassHost") or "")
+    if host:
+        run_helper("route-del", {"host": host})
+        meta["bypassHost"] = ""
+        save_meta(directory, meta)
+    return str(meta.get("label") or iface)
+
+
+def up_profile_darwin(iface: str) -> str:
+    _, profiles, _ = ensure_dirs()
+    directory, meta = load_meta(profiles, iface)
+    obfuscation = str(meta.get("obfuscation") or "none")
+    if obfuscation in {"lwo", "udp2raw"}:
+        fail(f"{obfuscation} is not started by this widget")
+    for other in list_profiles():
+        if str(other.get("iface") or "") != iface:
+            down_profile_darwin(str(other["iface"]), missing_ok=True)
+    down_profile_darwin(iface, missing_ok=True)
+    directory, meta = load_meta(profiles, iface)
+    try:
+        if obfuscation != "none":
+            binary = str(meta.get("transportBinary") or "")
+            transport_name = str(meta.get("transportFilename") or "")
+            port = int(meta.get("localPort") or 0)
+            transport_path = os.path.join(directory, transport_name)
+            if port <= 0 or not os.path.isfile(transport_path):
+                fail("missing transport file")
+            stop_proxy(iface)
+            start_user_proxy(iface, binary, transport_path, port)
+        host = str(meta.get("remoteHost") or "")
+        if host and meta.get("fullTunnel"):
+            run_helper("route-add", {"host": host})
+            meta["bypassHost"] = host
+            save_meta(directory, meta)
+        run_helper(
+            "tunnel-up",
+            {"iface": iface, "config": os.path.join(directory, "wg.conf"), "stateFile": darwin_state_path(iface)},
+        )
+    except EngineError:
+        down_profile_darwin(iface, missing_ok=True)
+        raise
+    return str(meta.get("label") or iface)
+
+
+def delete_profile_darwin(iface: str) -> str:
+    if not IFACE_RE.fullmatch(iface):
+        fail(f"unknown profile {iface}")
+    _, profiles, _ = ensure_dirs()
+    directory, meta = load_meta(profiles, iface)
+    label = str(meta.get("label") or iface)
+    down_profile_darwin(iface, missing_ok=True)
+    shutil.rmtree(directory, ignore_errors=True)
+    return label
+
+
 def down_profile(iface: str, *, missing_ok: bool = False) -> str:
+    if uses_darwin_tunnel():
+        return down_profile_darwin(iface, missing_ok=missing_ok)
     _, profiles, _ = ensure_dirs()
     directory = os.path.join(profiles, iface)
     meta_path = os.path.join(directory, "meta.json")
@@ -807,6 +942,8 @@ def down_profile(iface: str, *, missing_ok: bool = False) -> str:
 
 
 def delete_profile(iface: str) -> str:
+    if uses_darwin_tunnel():
+        return delete_profile_darwin(iface)
     if not IFACE_RE.fullmatch(iface):
         fail(f"unknown profile {iface}")
     _, profiles, _ = ensure_dirs()
@@ -830,6 +967,8 @@ def delete_profile(iface: str) -> str:
 
 
 def up_profile(iface: str) -> str:
+    if uses_darwin_tunnel():
+        return up_profile_darwin(iface)
     _, profiles, runtime = ensure_dirs()
     directory, meta = load_meta(profiles, iface)
     uuid = str(meta.get("nmUuid") or "")
@@ -878,15 +1017,58 @@ def parse_version(value: str) -> tuple[int, ...]:
     return tuple(numbers or [0])
 
 
-def package_format() -> str:
-    """Arch and its derivatives install the pacman package. Other hosts use the deb."""
-    if os.path.isfile("/etc/arch-release"):
+def os_release_ids() -> set[str]:
+    ids: set[str] = set()
+    try:
+        text = open("/etc/os-release", encoding="utf-8").read()
+    except OSError:
+        return ids
+    for line in text.splitlines():
+        if line.startswith("ID=") or line.startswith("ID_LIKE="):
+            raw = line.split("=", 1)[1].strip().strip('"').strip("'")
+            ids.update(part.lower() for part in raw.split())
+    return ids
+
+
+def format_for_ids(
+    ids: set[str],
+    arch_release: bool = False,
+    fedora_release: bool = False,
+    suse_release: bool = False,
+) -> str:
+    """Pick the package this host installs."""
+    if arch_release:
         return "pacman"
+    if "fedora" in ids or fedora_release:
+        return "rpm"
+    if any(item == "opensuse" or item.startswith("opensuse-") for item in ids) or "suse" in ids or suse_release:
+        return "zypper"
     return "deb"
 
 
+def package_format() -> str:
+    if uses_darwin_tunnel():
+        return "zip"
+    return format_for_ids(
+        os_release_ids(),
+        os.path.isfile("/etc/arch-release"),
+        os.path.isfile("/etc/fedora-release"),
+        os.path.isfile("/etc/SuSE-release"),
+    )
+
+
 def release_asset_name() -> str:
-    return PKG_ASSET if package_format() == "pacman" else DEB_ASSET
+    kind = package_format()
+    if kind == "pacman":
+        return PKG_ASSET
+    if kind == "rpm":
+        return RPM_ASSET
+    if kind == "zypper":
+        return ZYPPER_ASSET
+    if kind == "zip":
+        arch = mac_arch_label(os.uname().machine)
+        return MAC_ARM_ASSET if arch == "arm64" else MAC_X64_ASSET
+    return DEB_ASSET
 
 
 def choose_release_asset(assets: list[dict[str, Any]], name: str) -> str:

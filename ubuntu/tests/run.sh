@@ -227,11 +227,27 @@ import engine
 assets = [
     {"name": "continuum-vpn-widget_amd64.deb", "browser_download_url": "https://example.invalid/deb"},
     {"name": "continuum-vpn-widget-x86_64.pkg.tar.zst", "browser_download_url": "https://example.invalid/pkg"},
+    {"name": "continuum-vpn-widget-x86_64.rpm", "browser_download_url": "https://example.invalid/rpm"},
+    {"name": "continuum-vpn-widget-suse.x86_64.rpm", "browser_download_url": "https://example.invalid/suse"},
+    {"name": "continuum-vpn-widget-macos-arm64.zip", "browser_download_url": "https://example.invalid/arm"},
+    {"name": "continuum-vpn-widget-macos-x64.zip", "browser_download_url": "https://example.invalid/x64"},
 ]
 assert engine.choose_release_asset(assets, engine.DEB_ASSET) == "https://example.invalid/deb"
 assert engine.choose_release_asset(assets, engine.PKG_ASSET) == "https://example.invalid/pkg"
+assert engine.choose_release_asset(assets, engine.RPM_ASSET) == "https://example.invalid/rpm"
+assert engine.choose_release_asset(assets, engine.ZYPPER_ASSET) == "https://example.invalid/suse"
+assert engine.choose_release_asset(assets, engine.MAC_ARM_ASSET) == "https://example.invalid/arm"
+assert engine.choose_release_asset(assets, engine.MAC_X64_ASSET) == "https://example.invalid/x64"
 assert engine.choose_release_asset(assets, "missing") == ""
-expected = "pacman" if os.path.isfile("/etc/arch-release") else "deb"
-assert engine.package_format() == expected
+assert engine.format_for_ids({"opensuse-tumbleweed", "opensuse", "suse"}) == "zypper"
+assert engine.format_for_ids({"fedora"}) == "rpm"
+assert engine.format_for_ids(set(), arch_release=True) == "pacman"
+assert engine.format_for_ids(set()) == "deb"
+assert engine.package_format() == engine.format_for_ids(
+    engine.os_release_ids(),
+    os.path.isfile("/etc/arch-release"),
+    os.path.isfile("/etc/fedora-release"),
+    os.path.isfile("/etc/SuSE-release"),
+)
 PY
 echo "ok"

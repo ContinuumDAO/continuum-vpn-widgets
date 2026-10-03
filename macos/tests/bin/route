@@ -1,0 +1,5 @@
+#!/bin/sh
+printf 'route %s\n' "$*" >>"${CONTINUUM_VPN_IP_LOG:?}"
+if [ "$1" = "-n" ] && [ "$2" = "get" ]; then
+  printf 'gateway: 192.0.2.1\ninterface: en0\n'
+fi

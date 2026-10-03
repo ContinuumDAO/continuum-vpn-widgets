@@ -1,7 +1,16 @@
 *.deb
 *.pkg.tar.zst
+*.rpm
 ubuntu/staging/
 arch/staging/
+fedora/staging/
+fedora/rpmbuild/
+opensuse/staging/
+opensuse/rpmbuild/
+macos/staging/
+macos/third-party/
+continuum-vpn-widget-*-macos-*.zip
+continuum-vpn-widget-macos-*.zip
 ubuntu/third-party/
 __pycache__/
 *.pyc

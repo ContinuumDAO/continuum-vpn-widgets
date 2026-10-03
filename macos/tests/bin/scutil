@@ -1,0 +1,8 @@
+#!/usr/bin/env python3
+import os
+import sys
+
+log = os.environ["CONTINUUM_VPN_IP_LOG"]
+with open(log, "a", encoding="utf-8") as handle:
+    handle.write("scutil\n")
+    handle.write(sys.stdin.read())

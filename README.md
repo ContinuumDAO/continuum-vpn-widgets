@@ -28,6 +28,46 @@ Pacman installs Python, GTK, NetworkManager, WireGuard tools, and the Ayatana tr
 bash arch/scripts/build-pkg.sh
 ```
 
+## Fedora
+
+The same release also has `continuum-vpn-widget-<version>-1.x86_64.rpm`.
+
+```bash
+sudo dnf install ./continuum-vpn-widget-x86_64.rpm
+```
+
+Dnf installs Python, GTK, NetworkManager, WireGuard tools, and the Ayatana tray library if they are missing. On GNOME, enable the AppIndicator extension so the tray icon appears. Import or paste a bundle the same way as on Ubuntu. Installing WireGuard and the obfuscators yourself still works. `shadowsocks-rust` is not in the Fedora repositories, so a manual Shadowsocks setup uses the upstream `sslocal` release. The optional package already includes `sslocal`.
+
+```bash
+bash fedora/scripts/build-rpm.sh
+```
+
+## openSUSE
+
+The same release also has `continuum-vpn-widget-<version>-1.suse.x86_64.rpm`.
+
+```bash
+sudo zypper install --allow-unsigned-rpm ./continuum-vpn-widget-suse.x86_64.rpm
+```
+
+Zypper installs Python, GTK, NetworkManager, WireGuard tools, and the Ayatana tray library if they are missing. On GNOME, enable the AppIndicator extension so the tray icon appears. Import or paste a bundle the same way as on Ubuntu. Installing WireGuard and the obfuscators yourself still works. `shadowsocks-rust` is not in the official openSUSE repositories, so a manual Shadowsocks setup uses the upstream `sslocal` release. The optional package already includes `sslocal`.
+
+```bash
+bash opensuse/scripts/build-rpm.sh
+```
+
+## macOS
+
+The same release also has `continuum-vpn-widget-<version>-macos-arm64.zip` and `continuum-vpn-widget-<version>-macos-x64.zip`. Unzip the one that matches the Mac and move `Continuum VPN.app` to Applications.
+
+The app is unsigned. Gatekeeper blocks the first double-click. Control-click the app, choose Open, then choose Open again. If macOS still blocks it, use System Settings → Privacy & Security → Open Anyway.
+
+The app includes `sslocal` and `wg-obfuscator`. It does not include `udp2raw`. Import or paste a bundle from the menu bar. Installing WireGuard and the obfuscators yourself still works.
+
+```bash
+bash macos/scripts/build-app.sh
+```
+
 Profiles are stored under `~/.config/continuum-vpn/profiles/`. The widget checks GitHub Releases from its menu and can install a newer package.
 
 udp2raw runs from the bundled binary. A downloaded shell script is refused.

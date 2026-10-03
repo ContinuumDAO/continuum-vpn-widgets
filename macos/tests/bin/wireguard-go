@@ -1,0 +1,43 @@
+#!/usr/bin/env python3
+"""Stand-in wireguard-go. Names utun9 and accepts one UAPI config."""
+
+import os
+import socket
+import sys
+import threading
+import time
+
+name = "utun9"
+sock_dir = os.environ.get("CONTINUUM_VPN_WG_SOCK_DIR") or "/tmp"
+os.makedirs(sock_dir, mode=0o700, exist_ok=True)
+path = os.path.join(sock_dir, name + ".sock")
+try:
+    os.remove(path)
+except OSError:
+    pass
+print(f"Interface created: {name}", flush=True)
+log = os.environ.get("CONTINUUM_VPN_WG_LOG", "")
+server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+server.bind(path)
+os.chmod(path, 0o600)
+server.listen(1)
+
+
+def serve() -> None:
+    conn, _ = server.accept()
+    data = b""
+    while b"\n\n" not in data:
+        chunk = conn.recv(4096)
+        if not chunk:
+            break
+        data += chunk
+    if log:
+        with open(log, "ab") as handle:
+            handle.write(data)
+    conn.sendall(b"errno=0\n\n")
+    conn.close()
+
+
+threading.Thread(target=serve, daemon=True).start()
+time.sleep(60)
+sys.exit(0)

@@ -1,0 +1,2 @@
+#!/bin/sh
+printf 'ifconfig %s\n' "$*" >>"${CONTINUUM_VPN_IP_LOG:?}"
