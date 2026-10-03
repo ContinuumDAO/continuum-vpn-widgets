@@ -592,6 +592,8 @@ def run_tray() -> int:
         header.connect("activate", lambda *_: present_window())
         header.show()
         menu.prepend(header)
+        # Replacing the menu makes the panel read it. That read is not a click.
+        ui["menu_replaced"] = time.monotonic()
         indicator.set_menu(menu)
         window = ui["window"]
         if window is not None and window.get_visible():
@@ -720,12 +722,19 @@ def run_tray() -> int:
     started = time.monotonic()
 
     def on_bus_message(_connection, message, incoming, _data):
-        # A click on the tray icon asks the menu to open. The panel also
-        # sends that once while attaching the icon, which is not a click.
+        # A click on this tray icon asks its own menu to open. The panel also
+        # sends AboutToShow while attaching the icon, while reading a menu we
+        # just replaced, and for every other status icon. Those are not clicks.
         if not incoming or message.get_interface() != "com.canonical.dbusmenu":
             return message
-        if message.get_member() == "AboutToShow" and time.monotonic() - started > 1.5:
-            GLib.idle_add(present_window)
+        if message.get_member() != "AboutToShow":
+            return message
+        if message.get_path() != "/org/ayatana/NotificationItem/continuum-vpn/Menu":
+            return message
+        now = time.monotonic()
+        if now - started <= 1.5 or now - ui.get("menu_replaced", 0) <= 1.5:
+            return message
+        GLib.idle_add(present_window)
         return message
 
     bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
