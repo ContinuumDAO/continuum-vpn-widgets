@@ -10,14 +10,18 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - name: Build the Ubuntu, Arch, Fedora, and openSUSE packages
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+      - name: Build the Ubuntu, Arch, Fedora, openSUSE, and Windows packages
         run: |
           sudo apt-get update
-          sudo apt-get install -y zstd rpm
+          sudo apt-get install -y zstd rpm unzip zip
           bash ubuntu/scripts/build-deb.sh
           bash arch/scripts/build-pkg.sh
           bash fedora/scripts/build-rpm.sh
           bash opensuse/scripts/build-rpm.sh
+          bash windows/scripts/build-app.sh
       - name: Publish the package
         env:
           GH_TOKEN: ${{ github.token }}
@@ -25,7 +29,7 @@ jobs:
           version="${GITHUB_REF_NAME#v}"
           gh release create "$GITHUB_REF_NAME" \
             --title "Continuum VPN widgets $version" \
-            --notes "Ubuntu 24.04 and 26.04: install the .deb, then import or paste a profile bundle from the node VPN panel. Arch Linux: sudo pacman -U ./continuum-vpn-widget-${version}-1-x86_64.pkg.tar.zst. Fedora: sudo dnf install ./continuum-vpn-widget-${version}-1.x86_64.rpm. openSUSE: sudo zypper install --allow-unsigned-rpm ./continuum-vpn-widget-${version}-1.suse.x86_64.rpm. macOS: unzip the app, move it to Applications, then Control-click it and choose Open so Gatekeeper allows the first launch." \
+            --notes "Ubuntu 24.04 and 26.04: install the .deb, then import or paste a profile bundle from the node VPN panel. Arch Linux: sudo pacman -U ./continuum-vpn-widget-${version}-1-x86_64.pkg.tar.zst. Fedora: sudo dnf install ./continuum-vpn-widget-${version}-1.x86_64.rpm. openSUSE: sudo zypper install --allow-unsigned-rpm ./continuum-vpn-widget-${version}-1.suse.x86_64.rpm. macOS: unzip the app, move it to Applications, then Control-click it and choose Open so Gatekeeper allows the first launch. Windows: unzip and run Continuum VPN. It uses WireGuard for Windows, not WSL. If SmartScreen warns, choose More info, then Run anyway. A virus checker may block sslocal.exe or wg-obfuscator.exe; allow those files if an obfuscated profile will not start." \
             "continuum-vpn-widget_amd64.deb" \
             "continuum-vpn-widget_${version}_amd64.deb" \
             "continuum-vpn-widget-x86_64.pkg.tar.zst" \
@@ -33,7 +37,9 @@ jobs:
             "continuum-vpn-widget-x86_64.rpm" \
             "continuum-vpn-widget-${version}-1.x86_64.rpm" \
             "continuum-vpn-widget-suse.x86_64.rpm" \
-            "continuum-vpn-widget-${version}-1.suse.x86_64.rpm"
+            "continuum-vpn-widget-${version}-1.suse.x86_64.rpm" \
+            "continuum-vpn-widget-windows-x64.zip" \
+            "continuum-vpn-widget-${version}-windows-x64.zip"
   macos:
     needs: deb
     runs-on: macos-latest

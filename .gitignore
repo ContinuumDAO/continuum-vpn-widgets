@@ -11,6 +11,12 @@ macos/staging/
 macos/third-party/
 continuum-vpn-widget-*-macos-*.zip
 continuum-vpn-widget-macos-*.zip
+windows/staging/
+windows/third-party/
+*.exe
+!windows/tests/bin/*.exe
+continuum-vpn-widget-*-windows-*.zip
+continuum-vpn-widget-windows-*.zip
 ubuntu/third-party/
 __pycache__/
 *.pyc

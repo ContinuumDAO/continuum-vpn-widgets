@@ -68,6 +68,16 @@ The app includes `sslocal` and `wg-obfuscator`. It does not include `udp2raw`. I
 bash macos/scripts/build-app.sh
 ```
 
+## Windows
+
+The same release also has `continuum-vpn-widget-<version>-windows-x64.zip`. Unzip it and run Continuum VPN. The app does not use WSL. It turns tunnels on and off with WireGuard for Windows, which needs to be installed from wireguard.com. The app includes `sslocal` and `wg-obfuscator`. It does not include `udp2raw`.
+
+Windows SmartScreen may warn because the app is unsigned. Choose More info, then Run anyway. A virus checker may also remove or block `sslocal.exe` and `wg-obfuscator.exe`. If an obfuscated profile will not start, allow those files in the checker.
+
+```bash
+bash windows/scripts/build-app.sh
+```
+
 Profiles are stored under `~/.config/continuum-vpn/profiles/`. The widget checks GitHub Releases from its menu and can install a newer package.
 
 udp2raw runs from the bundled binary. A downloaded shell script is refused.

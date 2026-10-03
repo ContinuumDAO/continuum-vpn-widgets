@@ -1,0 +1,211 @@
+#!/usr/bin/env python3
+"""Privileged helper for the Windows Continuum VPN widget.
+
+Installs a sanitized config with WireGuard for Windows. Hook lines are refused.
+WSL is not used. udp2raw is not part of this helper.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import stat
+import subprocess
+import sys
+
+HOST_RE = re.compile(r"^[A-Za-z0-9.:-]{1,253}$")
+IFACE_RE = re.compile(r"^[A-Za-z0-9_=+.\-]{1,15}$")
+HOOKS = {"preup", "postup", "predown", "postdown"}
+
+
+def die(message: str) -> None:
+    print(message, file=sys.stderr)
+    raise SystemExit(1)
+
+
+def private_file(path: str) -> None:
+    if not os.path.isabs(path):
+        die("path must be absolute")
+    try:
+        info = os.lstat(path)
+    except OSError as exc:
+        die(str(exc))
+    if stat.S_ISLNK(info.st_mode):
+        die("refusing a symlink")
+    if not stat.S_ISREG(info.st_mode):
+        die("path is not a file")
+    parent = os.lstat(os.path.dirname(path))
+    if stat.S_ISLNK(parent.st_mode) or not stat.S_ISDIR(parent.st_mode):
+        die("parent is not a directory")
+    if os.name != "nt":
+        if info.st_mode & 0o022:
+            die("file is group or world writable")
+        if parent.st_mode & 0o022:
+            die("directory is group or world writable")
+
+
+def load_json(path: str) -> dict:
+    private_file(path)
+    with open(path, encoding="utf-8") as handle:
+        data = json.load(handle)
+    if not isinstance(data, dict):
+        die("request must be a JSON object")
+    return data
+
+
+def check_host(host: str) -> str:
+    if not isinstance(host, str) or not HOST_RE.fullmatch(host) or ".." in host or host.startswith("-"):
+        die("host is not a name or address")
+    return host
+
+
+def refuse_hooks(text: str) -> None:
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or line.startswith(";") or "=" not in line:
+            continue
+        key = line.split("=", 1)[0].strip().lower()
+        if key in HOOKS:
+            die("refusing a WireGuard hook")
+
+
+def wireguard_exe() -> str:
+    override = os.environ.get("CONTINUUM_VPN_WIREGUARD")
+    if override:
+        path = override
+    else:
+        path = os.path.join(os.environ.get("ProgramFiles", r"C:\Program Files"), "WireGuard", "wireguard.exe")
+    if not os.path.isfile(path) or not os.access(path, os.X_OK):
+        die("WireGuard for Windows is not installed")
+    return path
+
+
+def run(argv: list[str]) -> None:
+    result = subprocess.run(argv, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+    if result.returncode != 0:
+        die(result.stderr.strip() or result.stdout.strip() or f"{os.path.basename(argv[0])} failed")
+
+
+def default_gateway() -> str:
+    result = subprocess.run(
+        ["route", "PRINT", "-4"],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    for line in result.stdout.splitlines():
+        parts = line.split()
+        if len(parts) >= 3 and parts[0] == "0.0.0.0" and parts[1] == "0.0.0.0":
+            return check_host(parts[2])
+    die("no default route")
+    return ""
+
+
+def route_add(data: dict) -> None:
+    host = check_host(str(data.get("host") or ""))
+    gateway = default_gateway()
+    run(["route", "ADD", host, "MASK", "255.255.255.255", gateway])
+
+
+def route_del(data: dict) -> None:
+    host = check_host(str(data.get("host") or ""))
+    subprocess.run(
+        ["route", "DELETE", host],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+
+
+def service_conf(iface: str, source: str) -> str:
+    parent = os.path.dirname(source)
+    dest = os.path.join(parent, f"{iface}.wg.conf")
+    with open(source, encoding="utf-8") as handle:
+        text = handle.read()
+    refuse_hooks(text)
+    with open(dest, "w", encoding="utf-8") as handle:
+        handle.write(text if text.endswith("\n") else text + "\n")
+    if os.name != "nt":
+        os.chmod(dest, 0o600)
+    return dest
+
+
+def tunnel_up(data: dict) -> None:
+    config = str(data.get("config") or "")
+    state_path = str(data.get("stateFile") or "")
+    iface = str(data.get("iface") or "")
+    if not config or not state_path:
+        die("tunnel-up needs config and stateFile")
+    if not IFACE_RE.fullmatch(iface):
+        die("iface is invalid")
+    private_file(config)
+    installed = service_conf(iface, config)
+    run([wireguard_exe(), "/installtunnelservice", installed])
+    parent = os.path.dirname(state_path)
+    os.makedirs(parent, mode=0o700, exist_ok=True)
+    with open(state_path, "w", encoding="utf-8") as handle:
+        json.dump({"active": True, "iface": iface, "config": installed}, handle)
+        handle.write("\n")
+    if os.name != "nt":
+        os.chmod(state_path, 0o600)
+
+
+def tunnel_down(data: dict) -> None:
+    state_path = str(data.get("stateFile") or "")
+    iface = str(data.get("iface") or "")
+    if not state_path or not os.path.isabs(state_path) or not os.path.isfile(state_path):
+        return
+    try:
+        private_file(state_path)
+        with open(state_path, encoding="utf-8") as handle:
+            state = json.load(handle)
+    except (OSError, json.JSONDecodeError, SystemExit):
+        state = {}
+    name = str(state.get("iface") or iface)
+    if IFACE_RE.fullmatch(name):
+        binary = os.environ.get("CONTINUUM_VPN_WIREGUARD")
+        if not binary:
+            binary = os.path.join(os.environ.get("ProgramFiles", r"C:\Program Files"), "WireGuard", "wireguard.exe")
+        if os.path.isfile(binary):
+            subprocess.run(
+                [binary, "/uninstalltunnelservice", name],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+    config = str(state.get("config") or "")
+    if config and os.path.isfile(config) and config.endswith(".wg.conf"):
+        try:
+            os.remove(config)
+        except OSError:
+            pass
+    try:
+        os.remove(state_path)
+    except OSError:
+        pass
+
+
+def main() -> int:
+    if len(sys.argv) != 3:
+        die("usage: priv-helper tunnel-up|tunnel-down|route-add|route-del REQUEST.json")
+    command, path = sys.argv[1], sys.argv[2]
+    data = load_json(path)
+    if command == "tunnel-up":
+        tunnel_up(data)
+    elif command == "tunnel-down":
+        tunnel_down(data)
+    elif command == "route-add":
+        route_add(data)
+    elif command == "route-del":
+        route_del(data)
+    else:
+        die(f"unknown command {command}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

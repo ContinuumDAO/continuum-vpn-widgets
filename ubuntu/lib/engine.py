@@ -47,6 +47,7 @@ RPM_ASSET = "continuum-vpn-widget-x86_64.rpm"
 ZYPPER_ASSET = "continuum-vpn-widget-suse.x86_64.rpm"
 MAC_ARM_ASSET = "continuum-vpn-widget-macos-arm64.zip"
 MAC_X64_ASSET = "continuum-vpn-widget-macos-x64.zip"
+WIN_ASSET = "continuum-vpn-widget-windows-x64.zip"
 
 LIB_DIR = os.path.dirname(os.path.realpath(__file__))
 
@@ -87,6 +88,18 @@ def uses_darwin_tunnel() -> bool:
     if override:
         return override == "darwin"
     return sys.platform == "darwin"
+
+
+def uses_windows_tunnel() -> bool:
+    override = os.environ.get("CONTINUUM_VPN_PLATFORM")
+    if override:
+        return override == "windows"
+    return sys.platform == "win32"
+
+
+def uses_helper_tunnel() -> bool:
+    """macOS and Windows bring the tunnel up through the privileged helper."""
+    return uses_darwin_tunnel() or uses_windows_tunnel()
 
 
 def mac_arch_label(machine: str) -> str:
@@ -288,6 +301,8 @@ def bundled_binary(name: str) -> str:
     if not filename:
         fail(f"transport binary {name or '(missing)'} is not allowed")
     path = os.path.join(bin_dir(), filename)
+    if uses_windows_tunnel() and not os.path.isfile(path) and os.path.isfile(path + ".exe"):
+        path = path + ".exe"
     if not os.path.isfile(path) or not os.access(path, os.X_OK):
         fail(f"{filename} is not installed with Continuum VPN")
     return path
@@ -387,7 +402,7 @@ def bundle_from_json(text: str) -> dict[str, Any]:
         fail("lwo is not started by this widget")
     if obfuscation not in {"none", "shadowsocks", "wg_obfuscator", "udp2raw"}:
         fail(f"unsupported obfuscation {obfuscation}")
-    if uses_darwin_tunnel() and obfuscation == "udp2raw":
+    if uses_helper_tunnel() and obfuscation == "udp2raw":
         fail("udp2raw is not started by this widget")
     iface = str(data.get("iface") or "").strip()
     if not IFACE_RE.fullmatch(iface):
@@ -582,7 +597,7 @@ def nm(*args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
 def import_staged(profile_dir: str, meta: dict[str, Any]) -> str:
     iface = str(meta["iface"])
     label = str(meta["label"])
-    if uses_darwin_tunnel():
+    if uses_helper_tunnel():
         return label
     old = str(meta.get("nmUuid") or "")
     if old:
@@ -703,7 +718,7 @@ def port_listening(port: int) -> bool:
     listen = os.environ.get("CONTINUUM_VPN_LISTEN_DIR")
     if listen and os.path.isfile(os.path.join(listen, str(port))):
         return True
-    if uses_darwin_tunnel():
+    if uses_helper_tunnel():
         import socket
 
         probe_socket = socket.socket()
@@ -803,6 +818,16 @@ def run_helper(command: str, payload: dict[str, Any]) -> None:
         if uses_darwin_tunnel():
             shell = " ".join(shlex.quote(part) for part in cmd)
             cmd = ["osascript", "-e", "do shell script " + json.dumps(shell) + " with administrator privileges"]
+        elif uses_windows_tunnel():
+            quoted = ", ".join("'" + part.replace("'", "''") + "'" for part in [sys.executable, *cmd])
+            script = (
+                "Start-Process -FilePath "
+                + quoted.split(", ", 1)[0]
+                + " -ArgumentList "
+                + quoted.split(", ", 1)[1]
+                + " -Verb RunAs -Wait -WindowStyle Hidden"
+            )
+            cmd = ["powershell", "-NoProfile", "-NonInteractive", "-Command", script]
         else:
             cmd = ["pkexec", *cmd]
     result = subprocess.run(cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
@@ -838,7 +863,7 @@ def darwin_tunnel_active(iface: str) -> bool:
 
 
 def profile_is_active(meta: dict[str, Any], name: str) -> bool:
-    if uses_darwin_tunnel():
+    if uses_helper_tunnel():
         return darwin_tunnel_active(str(meta.get("iface") or name))
     return connection_active(str(meta.get("nmUuid") or ""))
 
@@ -914,7 +939,7 @@ def delete_profile_darwin(iface: str) -> str:
 
 
 def down_profile(iface: str, *, missing_ok: bool = False) -> str:
-    if uses_darwin_tunnel():
+    if uses_helper_tunnel():
         return down_profile_darwin(iface, missing_ok=missing_ok)
     _, profiles, _ = ensure_dirs()
     directory = os.path.join(profiles, iface)
@@ -942,7 +967,7 @@ def down_profile(iface: str, *, missing_ok: bool = False) -> str:
 
 
 def delete_profile(iface: str) -> str:
-    if uses_darwin_tunnel():
+    if uses_helper_tunnel():
         return delete_profile_darwin(iface)
     if not IFACE_RE.fullmatch(iface):
         fail(f"unknown profile {iface}")
@@ -967,7 +992,7 @@ def delete_profile(iface: str) -> str:
 
 
 def up_profile(iface: str) -> str:
-    if uses_darwin_tunnel():
+    if uses_helper_tunnel():
         return up_profile_darwin(iface)
     _, profiles, runtime = ensure_dirs()
     directory, meta = load_meta(profiles, iface)
@@ -1047,7 +1072,7 @@ def format_for_ids(
 
 
 def package_format() -> str:
-    if uses_darwin_tunnel():
+    if uses_darwin_tunnel() or uses_windows_tunnel():
         return "zip"
     return format_for_ids(
         os_release_ids(),
@@ -1066,6 +1091,8 @@ def release_asset_name() -> str:
     if kind == "zypper":
         return ZYPPER_ASSET
     if kind == "zip":
+        if uses_windows_tunnel():
+            return WIN_ASSET
         arch = mac_arch_label(os.uname().machine)
         return MAC_ARM_ASSET if arch == "arm64" else MAC_X64_ASSET
     return DEB_ASSET

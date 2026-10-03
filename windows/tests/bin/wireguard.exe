@@ -1,0 +1,16 @@
+#!/usr/bin/env python3
+"""Stand-in for WireGuard for Windows. Records the service command and does not run hooks."""
+
+import os
+import sys
+
+log = os.environ["CONTINUUM_VPN_WG_LOG"]
+with open(log, "a", encoding="utf-8") as handle:
+    handle.write(" ".join(sys.argv[1:]) + "\n")
+    if len(sys.argv) >= 3 and sys.argv[1] == "/installtunnelservice":
+        with open(sys.argv[2], encoding="utf-8") as conf:
+            text = conf.read()
+        handle.write(text)
+        if "PostUp" in text or "PreUp" in text or "curl" in text:
+            sys.stderr.write("refusing to execute a hook\n")
+            sys.exit(1)
