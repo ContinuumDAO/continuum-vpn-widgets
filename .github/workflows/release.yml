@@ -10,8 +10,12 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - name: Build the Ubuntu package
-        run: bash ubuntu/scripts/build-deb.sh
+      - name: Build the Ubuntu and Arch packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y zstd
+          bash ubuntu/scripts/build-deb.sh
+          bash arch/scripts/build-pkg.sh
       - name: Publish the package
         env:
           GH_TOKEN: ${{ github.token }}
@@ -19,6 +23,13 @@ jobs:
           version="${GITHUB_REF_NAME#v}"
           gh release create "$GITHUB_REF_NAME" \
             --title "Continuum VPN widgets $version" \
-            --notes "Ubuntu 24.04 and 26.04 package. Install the .deb, then import or paste a profile bundle from the node VPN panel." \
+            --notes "$(cat <<EOF
+Ubuntu 24.04 and 26.04: install the .deb, then import or paste a profile bundle from the node VPN panel.
+
+Arch Linux: install with \`sudo pacman -U ./continuum-vpn-widget-${version}-1-x86_64.pkg.tar.zst\`, then import or paste a profile bundle.
+EOF
+)" \
             "continuum-vpn-widget_amd64.deb" \
-            "continuum-vpn-widget_${version}_amd64.deb"
+            "continuum-vpn-widget_${version}_amd64.deb" \
+            "continuum-vpn-widget-x86_64.pkg.tar.zst" \
+            "continuum-vpn-widget-${version}-1-x86_64.pkg.tar.zst"

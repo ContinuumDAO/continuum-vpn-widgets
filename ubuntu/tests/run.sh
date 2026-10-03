@@ -220,4 +220,18 @@ rows = {row["iface"]: row for row in json.loads(sys.argv[1])}
 assert "eg-aabbccddeeff" not in rows
 assert "1.2.3.4" in rows
 PY
+ENGINE_LIB="$ROOT/lib" python3 - <<'PY'
+import os, sys
+sys.path.insert(0, os.environ["ENGINE_LIB"])
+import engine
+assets = [
+    {"name": "continuum-vpn-widget_amd64.deb", "browser_download_url": "https://example.invalid/deb"},
+    {"name": "continuum-vpn-widget-x86_64.pkg.tar.zst", "browser_download_url": "https://example.invalid/pkg"},
+]
+assert engine.choose_release_asset(assets, engine.DEB_ASSET) == "https://example.invalid/deb"
+assert engine.choose_release_asset(assets, engine.PKG_ASSET) == "https://example.invalid/pkg"
+assert engine.choose_release_asset(assets, "missing") == ""
+expected = "pacman" if os.path.isfile("/etc/arch-release") else "deb"
+assert engine.package_format() == expected
+PY
 echo "ok"

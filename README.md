@@ -14,6 +14,20 @@ sudo apt install ./continuum-vpn-widget_amd64.deb
 
 Open Continuum VPN from the app menu. Import the `continuum-vpn-*.json` bundle, or paste it. One profile is up at a time.
 
+## Arch Linux
+
+The same release also has `continuum-vpn-widget-<version>-1-x86_64.pkg.tar.zst`.
+
+```bash
+sudo pacman -U ./continuum-vpn-widget-x86_64.pkg.tar.zst
+```
+
+Pacman installs Python, GTK, NetworkManager, WireGuard tools, and the Ayatana tray library if they are missing. On GNOME, enable the AppIndicator extension so the tray icon appears. Import or paste a bundle the same way as on Ubuntu. Installing WireGuard and the obfuscators yourself still works.
+
+```bash
+bash arch/scripts/build-pkg.sh
+```
+
 Profiles are stored under `~/.config/continuum-vpn/profiles/`. The widget checks GitHub Releases from its menu and can install a newer package.
 
 udp2raw runs from the bundled binary. A downloaded shell script is refused.

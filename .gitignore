@@ -1,5 +1,7 @@
 *.deb
+*.pkg.tar.zst
 ubuntu/staging/
+arch/staging/
 ubuntu/third-party/
 __pycache__/
 *.pyc

@@ -41,6 +41,7 @@ HOOKS = {"preup", "postup", "predown", "postdown"}
 HOST_RE = re.compile(r"^[A-Za-z0-9.:-]{1,253}$")
 RELEASE_API = "https://api.github.com/repos/ContinuumDAO/continuum-vpn-widgets/releases/latest"
 DEB_ASSET = "continuum-vpn-widget_amd64.deb"
+PKG_ASSET = "continuum-vpn-widget-x86_64.pkg.tar.zst"
 
 LIB_DIR = os.path.dirname(os.path.realpath(__file__))
 
@@ -877,6 +878,26 @@ def parse_version(value: str) -> tuple[int, ...]:
     return tuple(numbers or [0])
 
 
+def package_format() -> str:
+    """Arch and its derivatives install the pacman package. Other hosts use the deb."""
+    if os.path.isfile("/etc/arch-release"):
+        return "pacman"
+    return "deb"
+
+
+def release_asset_name() -> str:
+    return PKG_ASSET if package_format() == "pacman" else DEB_ASSET
+
+
+def choose_release_asset(assets: list[dict[str, Any]], name: str) -> str:
+    for asset in assets:
+        if asset.get("name") == name:
+            url = str(asset.get("browser_download_url") or "")
+            if url:
+                return url
+    return ""
+
+
 def newer_release() -> dict[str, str] | None:
     """Return asset info when GitHub has a newer widget release."""
     try:
@@ -890,10 +911,10 @@ def newer_release() -> dict[str, str] | None:
     tag = str(data.get("tag_name") or "")
     if parse_version(tag) <= parse_version(installed_version()):
         return None
-    for asset in data.get("assets") or []:
-        if asset.get("name") == DEB_ASSET:
-            return {"tag": tag, "url": str(asset.get("browser_download_url") or "")}
-    return None
+    url = choose_release_asset(list(data.get("assets") or []), release_asset_name())
+    if not url:
+        return None
+    return {"tag": tag, "url": url, "format": package_format()}
 
 
 def main(argv: list[str]) -> int:

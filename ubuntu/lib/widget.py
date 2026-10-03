@@ -8,6 +8,7 @@ import os
 import sys
 import threading
 import time
+import urllib.parse
 import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
@@ -690,7 +691,7 @@ def run_tray() -> int:
             text=f"Install Continuum VPN {found['tag']}?",
             buttons=Gtk.ButtonsType.NONE,
         )
-        dialog.format_secondary_text("This replaces the optional Ubuntu package. Your saved profiles stay on this computer.")
+        dialog.format_secondary_text("This replaces the optional package. Your saved profiles stay on this computer.")
         dialog.add_button("Not now", Gtk.ResponseType.CANCEL)
         dialog.add_button("Install", Gtk.ResponseType.ACCEPT)
         if dialog.run() != Gtk.ResponseType.ACCEPT:
@@ -698,12 +699,17 @@ def run_tray() -> int:
             return
         dialog.destroy()
         try:
-            dest = os.path.join(engine.runtime_dir(), "continuum-vpn-widget_amd64.deb")
+            filename = os.path.basename(urllib.parse.urlparse(found["url"]).path) or engine.release_asset_name()
+            dest = os.path.join(engine.runtime_dir(), filename)
             urllib.request.urlretrieve(found["url"], dest)
         except Exception as exc:
             alert(f"Could not download the update: {exc}")
             return
-        result = os.spawnvp(os.P_WAIT, "pkexec", ["pkexec", "apt-get", "install", "-y", dest])
+        if found.get("format") == "pacman":
+            install = ["pkexec", "pacman", "-U", "--noconfirm", dest]
+        else:
+            install = ["pkexec", "apt-get", "install", "-y", dest]
+        result = os.spawnvp(os.P_WAIT, "pkexec", install)
         if result != 0:
             alert("The package was not installed.")
 
