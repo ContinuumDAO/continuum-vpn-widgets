@@ -146,14 +146,20 @@ def run_tray() -> int:
         profile_box.set_margin_top(8)
         profile_box.set_margin_bottom(8)
 
-        status = Gtk.Label(label="Disconnected")
-        status.set_halign(Gtk.Align.START)
-        status.set_line_wrap(True)
-        status.set_max_width_chars(48)
-        status.set_margin_start(18)
-        status.set_margin_end(18)
-        status.set_margin_top(4)
-        status.set_margin_bottom(4)
+        status = Gtk.Button.new_with_label("Disconnected")
+        status.set_halign(Gtk.Align.END)
+        status.set_valign(Gtk.Align.CENTER)
+        status.get_style_context().add_class("status-badge")
+        status.get_style_context().add_class("status-off")
+        status.set_tooltip_text("Connect")
+        status.connect("clicked", lambda *_: toggle_connection())
+
+        header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
+        header.set_margin_top(12)
+        header.set_margin_bottom(2)
+        header.set_margin_start(18)
+        header.set_margin_end(18)
+        header.pack_end(status, False, False, 0)
 
         scrolled = Gtk.ScrolledWindow()
         scrolled.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
@@ -169,8 +175,8 @@ def run_tray() -> int:
         actions.set_margin_bottom(18)
 
         root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        root.pack_start(header, False, False, 0)
         root.pack_start(hero, False, False, 0)
-        root.pack_start(status, False, False, 0)
         root.pack_start(scrolled, True, True, 0)
         root.pack_start(actions, False, False, 0)
         window.add(root)
@@ -205,6 +211,38 @@ def run_tray() -> int:
             button.on-button.is-current, button.off-button.is-current {
               border-width: 3px;
               border-color: #ffffff;
+            }
+            button.status-badge {
+              background-image: none;
+              border-radius: 999px;
+              padding: 2px 16px;
+              min-height: 34px;
+            }
+            button.status-badge label {
+              color: #ffffff;
+              font-weight: bold;
+            }
+            button.status-badge.status-on,
+            button.status-badge.status-on:hover,
+            button.status-badge.status-on:active {
+              background-color: #1e8e3e;
+              color: #ffffff;
+              border-color: #146c2e;
+            }
+            button.status-badge.status-off,
+            button.status-badge.status-off:hover,
+            button.status-badge.status-off:active {
+              background-color: #c5221f;
+              color: #ffffff;
+              border-color: #8c1d18;
+            }
+            button.status-badge.status-busy,
+            button.status-badge.status-busy:disabled {
+              background-image: none;
+              background-color: #5f6368;
+              color: #ffffff;
+              border-color: #3c4043;
+              opacity: 1;
             }
             """
         )
@@ -300,15 +338,48 @@ def run_tray() -> int:
         rebuild.signature = None
         rebuild()
 
-    def refresh_connection_controls() -> None:
+    def paint_status(text: str, kind: str, tip: str, sensitive: bool = True) -> None:
         status = ui.get("status_label")
         if status is None:
             return
-        active = next((item for item in ui.get("rows") or [] if item.get("active")), None)
+        status.set_label(text)
+        status.set_tooltip_text(tip)
+        status.set_sensitive(sensitive)
+        context = status.get_style_context()
+        for name in ("status-on", "status-off", "status-busy"):
+            context.remove_class(name)
+        context.add_class(f"status-{kind}")
+
+    def connection_target() -> dict | None:
+        rows = [item for item in ui.get("rows") or [] if item.get("iface")]
+        selected = str(ui.get("selected") or "")
+        match = next((item for item in rows if str(item.get("iface")) == selected), None)
+        return match or (rows[0] if rows else None)
+
+    def refresh_connection_controls() -> None:
+        rows = [item for item in ui.get("rows") or [] if item.get("iface")]
+        active = next((item for item in rows if item.get("active")), None)
         if active:
-            status.set_text(f"Connected to {profile_caption(active)}")
-        else:
-            status.set_text("Disconnected")
+            label = profile_caption(active)
+            paint_status(f"Connected to {label}", "on", f"Disconnect {label}")
+            return
+        target = connection_target()
+        if target:
+            paint_status("Disconnected", "off", f"Connect {profile_caption(target)}")
+            return
+        paint_status("Disconnected", "off", "Import a VPN to connect", sensitive=False)
+
+    def toggle_connection() -> None:
+        if ui.get("busy"):
+            return
+        rows = [item for item in ui.get("rows") or [] if item.get("iface")]
+        active = next((item for item in rows if item.get("active")), None)
+        if active:
+            set_profile(str(active["iface"]), False)
+            return
+        target = connection_target()
+        if target:
+            set_profile(str(target["iface"]), True)
 
     def add_param(grid: Gtk.Grid, row_index: int, name: str, value: str) -> None:
         key = Gtk.Label(label=name)
@@ -413,9 +484,7 @@ def run_tray() -> int:
 
     def start_import(text: str, name: str) -> None:
         ui["busy"] = True
-        status = ui.get("status_label")
-        if status is not None:
-            status.set_text("Importing…")
+        paint_status("Importing…", "busy", "Importing", sensitive=False)
 
         def work() -> None:
             error = ""
