@@ -344,6 +344,19 @@ def parse_udp2raw_transport(text: str) -> dict[str, Any]:
     }
 
 
+def ensure_shadowsocks_udp(text: str) -> str:
+    """sslocal 1.18+ treats a server with no mode as TCP-only and drops WireGuard UDP."""
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as exc:
+        fail(f"shadowsocks transport is not JSON: {exc.msg}")
+    if not isinstance(data, dict):
+        fail("shadowsocks transport must be a JSON object")
+    if str(data.get("mode") or "").strip().lower() != "tcp_and_udp":
+        data["mode"] = "tcp_and_udp"
+    return json.dumps(data, indent=2) + "\n"
+
+
 def shadowsocks_fields(text: str) -> tuple[str, int]:
     try:
         data = json.loads(text)
@@ -434,6 +447,7 @@ def bundle_from_json(text: str) -> dict[str, Any]:
             fail(f"transport binary {transport_bin or '(missing)'} is not allowed")
         if not transport_text.strip():
             fail("obfuscated profile is missing transportConfig")
+        transport_text = ensure_shadowsocks_udp(transport_text)
         remote_host, local_port = shadowsocks_fields(transport_text)
         transport_name = f"{iface}-ss.json"
         transport_bin = "sslocal"
@@ -776,6 +790,10 @@ def start_user_proxy(iface: str, binary_name: str, transport: str, port: int) ->
     log = os.path.join(runtime, f"{iface}.log")
     pidfile = os.path.join(runtime, f"{iface}.pid")
     if binary_name in {"sslocal", "shadowsocks-rust.sslocal"}:
+        with open(transport, encoding="utf-8") as handle:
+            fixed = ensure_shadowsocks_udp(handle.read())
+        with open(transport, "w", encoding="utf-8") as handle:
+            handle.write(fixed)
         argv = [binary, "-c", transport]
     elif binary_name == "wg-obfuscator":
         argv = [binary, "--config", transport]

@@ -140,6 +140,11 @@ json.dump({
 }, open(path, "w"))
 PY
 [[ "$("${ENGINE[@]}" import-file "$BUNDLE")" == "Frankfurt" ]]
+python3 - "$CONTINUUM_VPN_CONFIG_DIR/profiles/1.2.3.4/1.2.3.4-ss.json" <<'PY'
+import json, sys
+data = json.load(open(sys.argv[1], encoding="utf-8"))
+assert data.get("mode") == "tcp_and_udp", data.get("mode")
+PY
 
 U2R="$WORKDIR/u2r.json"
 python3 - "$U2R" "$PRIV" "$PUB" <<'PY'
